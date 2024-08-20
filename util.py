@@ -2,15 +2,38 @@ from subprocess import CalledProcessError, run
 from functools import lru_cache
 from typing import Optional, Union, NoReturn, Any, List, Tuple
 import numpy as np
-
+from datetime import datetime
 
 import torch
 from torch import Tensor, nn
 import torch.nn.functional as F
 import torchaudio
 import matplotlib.pyplot as plt
-import math, os, pathlib, random, argparse
+import math, os, pathlib, random, argparse, json
 
+
+
+def get_logger(log_dir: str, name: str, log_filename: str = 'log', require_writer: bool = True):
+	os.makedirs(log_dir, exist_ok=True)
+
+	class CustomLogger:
+		def __init__(self, name):
+			self.name = name
+			if require_writer:
+				self.log_file = open(os.path.join(log_dir, log_filename + '.log'), 'a')
+
+		def info(self, message):
+			log_entry = f"{datetime.now()} - {self.name} - INFO - {message}"
+			if require_writer:
+				self.log_file.write(log_entry + '\n')
+			print(log_entry)
+
+		def __del__(self):
+			if require_writer:
+				self.log_file.close()
+
+	print('Log directory: ', log_dir)
+	return CustomLogger(name)
 
 
 class TextProcess:
@@ -155,48 +178,67 @@ def overall_accuracy(all_r: list, all_h: list):
 
 
 def plot_metrics(metrics_list, train_id):
-    """
-    Plot train and test loss, word error rate, and accuracy.
-    """
-    epochs = [t[0] for t in metrics_list]
-    steps = [t[1] for t in metrics_list]
-    train_losses = [t[2] for t in metrics_list]
-    test_losses = [t[3] for t in metrics_list]
-    wer = [t[4] for t in metrics_list]
-    accuracy = [t[5] for t in metrics_list]
+	"""
+	Plot train and test loss, word error rate, and accuracy.
+	"""
+	key_plot = 'micro' if config.epoch < 50 and len(metrics_list['micro']) > 0 else 'main'
+	order = ('main', 'micro') if key_plot == 'micro' else ('micro', 'main')
+	best_metrics = None
+	min_wer = float('inf')
+	content = []
 
-    combined_epochs = np.array(epochs) + np.array(steps) / max(steps)
+	for key in order:
+		epochs = [t[0] for t in metrics_list[key]]
+		steps = [t[1] for t in metrics_list[key]]
+		train_losses = [t[2].item() for t in metrics_list[key]]
+		test_losses = [t[3].item() for t in metrics_list[key]]
+		wer = [t[4] for t in metrics_list[key]]
+		accuracy = [t[5] for t in metrics_list[key]]
 
-    fig, axs = plt.subplots(3, figsize=(10, 10))
+		content.append({
+			f"train_losses_{key}": train_losses,
+			f"test_losses_{key}": test_losses,
+			f"wer_{key}": wer,
+			f"accuracy_{key}": accuracy,
+		})
+		if wer == []:
+			continue
+		if min(wer) < min_wer:
+			min_wer = min(wer)
+			min_index = wer.index(min_wer)
+			best_metrics = (accuracy[min_index], min_wer, train_losses[min_index], test_losses[min_index],)
 
-    # Train and test loss plot
-    axs[0].plot(combined_epochs, train_losses, label='Train Loss')
-    axs[0].plot(combined_epochs, test_losses, label='Test Loss')
-    axs[0].set_title('Loss')
-    axs[0].set_xlabel('Epoch')
-    axs[0].set_ylabel('Loss')
-    axs[0].legend()
+	json.dump(content, open(f"logs/{train_id}.json", 'w'))
 
-    plt.savefig(f"{train_id}_loss.png")
-    plt.clf()
+	config.logger.info(f"Using {key_plot} for plots")
 
-    plt.plot(combined_epochs, wer)
-    plt.title('Word Error Rate')
-    plt.xlabel('Epoch')
-    plt.ylabel('WER')
-    plt.savefig(f"{train_id}_wer.png")
-    plt.clf()
+	combined_epochs = np.array(epochs) + np.array(steps) / max(steps) if key_plot == 'micro' else epochs
 
-    plt.plot(combined_epochs, accuracy)
-    plt.title('Accuracy')
-    plt.xlabel('Epoch')
-    plt.ylabel('Accuracy')
-    plt.savefig(f"{train_id}_accuracy.png")
-    plt.clf()
+	plt.plot(combined_epochs, train_losses, label='Train Loss')
+	plt.plot(combined_epochs, test_losses, label='Test Loss')
+	plt.title('Loss')
+	plt.xlabel('Epoch')
+	plt.ylabel('Loss')
+	plt.legend()
 
-    min_wer = min(wer)
-    min_wer_index = wer.index(min_wer)
-    return accuracy[min_wer_index], min_wer, train_losses[min_wer_index], test_losses[min_wer_index] 
+	plt.savefig(f"logs/{train_id}_loss.png")
+	plt.clf()
+
+	plt.plot(combined_epochs, wer)
+	plt.title('Word Error Rate')
+	plt.xlabel('Epoch')
+	plt.ylabel('WER')
+	plt.savefig(f"logs/{train_id}_wer.png")
+	plt.clf()
+
+	plt.plot(combined_epochs, accuracy)
+	plt.title('Accuracy')
+	plt.xlabel('Epoch')
+	plt.ylabel('Accuracy')
+	plt.savefig(f"logs/{train_id}_accuracy.png")
+	plt.clf()
+
+	return best_metrics 
 
 
 
@@ -257,8 +299,6 @@ class Config:
 			k, v = kv
 			self.__setattr__(k, v)
 
-		after_conf_init()
-
 
 	def get_model_params(self, abstract: bool = False) -> dict:
 		'''
@@ -297,7 +337,7 @@ FRAMES_PER_SECOND = SAMPLE_RATE // HOP_LENGTH  # 10ms per audio frame
 TOKENS_PER_SECOND = SAMPLE_RATE // N_SAMPLES_PER_TOKEN  # 20ms per audio token
 
 text_process = TextProcess()
-exact_div = lambda a,b: a // b
+exact_div = lambda a, b: a // b
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 N_VOCABS = len(text_process)
 seqlen = 6
@@ -306,21 +346,19 @@ params = {
 	'model_name': 'Whisper',
 	'device': device,
 	'text_process': text_process,
-    'train_path': os.path.join(os.path.dirname(__file__), 'train_data'),
+	'train_path': os.path.join(os.path.dirname(__file__), 'train_data'),
 	'test_path': os.path.join(os.path.dirname(__file__), 'test_data'),
 	'noise_path': os.path.join(os.path.dirname(__file__), 'noise_dir'),
 	'checkpoint_dir': 'checkpoints',
 	'log_dir': 'logs',
-	'epoch_default': 600,
-	'epoch_start': 0,
-	'epoch_stop': 600,
-	'steps': 50,
+	'epoch': 500,
+	'test_steps': 40,
 	'model_mode': 'train',
 	'test_freq': 5,
 	'batch_size': 16,
 	'seq_len': seqlen,
 	'n_vocab': N_VOCABS,
-	'specaug_rate': 0.25,
+	'specaug_rate': 0.3,
 	'freq_mask': 27,
 	'time_mask': 70,
 	'sample_rate': SAMPLE_RATE, 
@@ -345,8 +383,8 @@ params = {
 	'regularization_on_mel': False,
 	'regularization_on_data': True,
 
-	'lr': 4e-4,
-	'n_audio_ctx': 600,
+	'lr': 1e-3,
+	'n_audio_ctx': (CHUNK_LENGTH * 100) // 2,
 
 	'n_text_ctx': seqlen,
 
@@ -354,17 +392,22 @@ params = {
 	'text_dropout': 0.1,
 	'attention_dropout': 0.1,
 	'wandb': False,
-	'causal_mode': 'non-causal',
+	'causal_mode': 'non-causal', # causal, non-causal, semi-causal, bw-semi-causal
 	'variation': '',
 	'logger': None,
+	'log_anything': True,
 	'save_checkpoints': False,
+	'model_path': '',
+	'train_id': '',
+	'one_shot': False,
+	'fine_tune': False,
+	'no_footprint': False,
+	'freeze_encoder': False,
 }
 
 config = Config(params)
 config.autocast = torch.autocast(device_type=config.device, dtype=config.dtype)
 cache = {}
-
-
 
 
 class RandomBackgroundNoise(nn.Module):
@@ -462,8 +505,8 @@ class TimeStretch(nn.Module):
 class Augmentator(nn.Module):
 
 	def __init__(self, rate: Optional[int] = config.specaug_rate,
-	    	freq_mask: Optional[int] = config.freq_mask,
-	    	time_mask: Optional[int] = config.time_mask,
+			freq_mask: Optional[int] = config.freq_mask,
+			time_mask: Optional[int] = config.time_mask,
 		):
 		super(Augmentator, self).__init__()
 		self.rate = rate
@@ -703,8 +746,8 @@ def log_mel_spectrogram(
 	else:
 		raise ValueError('hehehe')
 
-	# if augmentator is not None:
-	# 	audio = augmentator(audio.view(1, -1), before_or_after='before').view(-1)
+	if augmentator is not None:
+		audio = augmentator(audio.view(1, -1), before_or_after='before').view(-1)
 
 	if device is not None:
 		audio = audio.to(device)
@@ -745,8 +788,8 @@ def prepare_audio(
 	mel = log_mel_spectrogram(file_path, padding=config.n_samples, device=device, augmentator=augmentator)
 	mel = pad_or_trim(mel, config.n_frames)
 
-	if augmentator:
-		mel = apply_spec_augment(mel)
+	# if augmentator:
+	# 	mel = apply_spec_augment(mel)
 
 	return mel
 

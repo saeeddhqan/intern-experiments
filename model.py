@@ -54,15 +54,21 @@ class RMSNorm(nn.Module):
 
 
 class MultiHeadAttention(nn.Module):
-	def __init__(self, n_state: int, n_head: int, causalty: bool):
+	def __init__(self, n_state: int, n_head: int, causality: str):
 		super().__init__()
 		self.n_head = n_head
 		self.query = Linear(n_state, n_state, bias=False)
 		self.key = Linear(n_state, n_state, bias=False)
 		self.value = Linear(n_state, n_state, bias=True)
 		self.out = Linear(n_state, n_state, bias=True)
-		self.dropout = 0.0
-		self.causalty = causalty
+		self.causality = causality
+		if causality == 'semi-causal':
+			# for 30sec
+			# self.nblocks = 15 # 15 * 100 == 1500 for 30 seconds of audio
+			# self.bsize = 100 # n of samples for each second
+			# for 7sec
+			self.nblocks = 7
+			self.bsize = 50
 
 	def forward(
 		self,
@@ -82,46 +88,42 @@ class MultiHeadAttention(nn.Module):
 	):
 		B, T, C = q.shape
 		scale = (C // self.n_head) ** -0.25
-		q = q.view(*q.shape[:2], self.n_head, -1).permute(0, 2, 1, 3) * scale
-		k = k.view(*k.shape[:2], self.n_head, -1).permute(0, 2, 3, 1) * scale
-		v = v.view(*v.shape[:2], self.n_head, -1).permute(0, 2, 1, 3)
-
-		# x = F.scaled_dot_product_attention(q, k, v,
-		# 	dropout_p=self.dropout if self.training else 0,
-		# 	is_causal=self.causalty,
-		# 	scale=1.0)
-		qk = (q @ k)
-		if mask is not None and self.causalty:
-			qk = qk + mask[:T, :T]
-		qk = qk.float()
-		w = F.softmax(qk.float(), dim=-1).to(q.dtype)
-		return (w @ v).permute(0, 2, 1, 3).flatten(start_dim=2)
+		if self.causality != 'semi-causal':
+			q = q.view(*q.shape[:2], self.n_head, -1).permute(0, 2, 1, 3) * scale
+			k = k.view(*k.shape[:2], self.n_head, -1).permute(0, 2, 3, 1) * scale
+			v = v.view(*v.shape[:2], self.n_head, -1).permute(0, 2, 1, 3)
+			qk = (q @ k)
+			if mask is not None and self.causality in ('causal', 'bw-semi-causal'):
+				qk = qk + mask[:T, :T]
+			w = F.softmax(qk.float(), dim=-1).to(q.dtype)
+			return (w @ v).permute(0, 2, 1, 3).flatten(start_dim=2)
+		else:
+			q = q.view(B, self.nblocks, self.bsize, self.n_head, -1).permute(0, 3, 1, 2, 4) * scale
+			k = k.view(B, self.nblocks, self.bsize, self.n_head, -1).permute(0, 3, 1, 4, 2) * scale
+			v = v.view(B, self.nblocks, self.bsize, self.n_head, -1).permute(0, 3, 1, 2, 4)
+			w = (q @ k).float().softmax(dim=-1).to(q.dtype)
+			return (w @ v).permute(0, 2, 3, 1, 4).flatten(start_dim=3).view(B, T, C)
 
 
 class NonLinear(nn.Module):
 	def __init__(self, n_state):
 		super().__init__()
 		self.dim = n_state
-		self.w1 = nn.Linear(self.dim, 4 * self.dim, bias=True)
-		self.w2 = nn.Linear(4 * self.dim, self.dim, bias=True)
-		# self.w3 = nn.Linear(self.dim, 4 * self.dim, bias=False)
+		self.w1 = nn.Linear(self.dim, 4 * self.dim)
+		self.w2 = nn.Linear(4 * self.dim, self.dim)
 
 	def forward(self, x: Tensor):
-		'''
-			mlp forward
-		'''
-		# return self.w2(F.silu(self.w1(x)) * self.w3(x))
 		return self.w2(F.gelu(self.w1(x)))
 
 
 class ResidualAttentionBlock(nn.Module):
-	def __init__(self, n_state: int, n_head: int, cross_attention: bool = False, causalty: bool = True):
+	def __init__(self, n_state: int, n_head: int, cross_attention: bool = False, causality: str = 'causal'):
 		super().__init__()
-		self.attn = MultiHeadAttention(n_state, n_head, causalty=causalty)
+		self.attn = MultiHeadAttention(n_state, n_head, causality=causality)
 		self.attn_ln = LayerNorm(n_state, eps=1e-8)
 
 		self.cross_attn = (
-			MultiHeadAttention(n_state, n_head, causalty=False) if cross_attention else None
+			MultiHeadAttention(n_state, n_head, causality='non-causal') if cross_attention else None
 		)
 		self.cross_attn_ln = LayerNorm(n_state) if cross_attention else None
 
@@ -154,10 +156,9 @@ def sinusoids(length, channels, max_timescale=10000):
 
 class AudioEncoder(nn.Module):
 	def __init__(
-		self, n_mels: int, n_ctx: int, n_state: int, n_head: int, n_layers: int, n_frames: int,	causalty: str,
+		self, n_mels: int, n_ctx: int, n_state: int, n_head: int, n_layers: int, n_frames: int,	causality: str,
 	):
 		super().__init__()
-		causalty = causalty == 'causal'
 
 		self.n_layers = n_layers
 		self.conv1 = Conv1d(n_mels, n_state, kernel_size=3, padding=1)
@@ -165,14 +166,29 @@ class AudioEncoder(nn.Module):
 		self.register_buffer('positional_embedding', sinusoids(n_ctx, n_state))
 
 		self.blocks: Iterable[ResidualAttentionBlock] = nn.ModuleList(
-			[ResidualAttentionBlock(n_state, n_head, causalty=causalty, idx=idx) for idx in range(n_layers)]
+			[ResidualAttentionBlock(n_state,
+				n_head,
+				causality=causality,
+				) for idx in range(n_layers)]
 		)
 		self.ln_encode = LayerNorm(n_state)
 		self.ln_post = LayerNorm(n_state)
-		self.mask = None
-		if causalty:
+		if causality == 'causal':
 			mask = torch.empty(n_ctx, n_ctx).fill_(float('-inf')).triu_(1)
 			self.register_buffer('mask', mask, persistent=False)
+		elif causality == 'bw-semi-causal':
+			# for 30sec datasets
+			# num_blocks = 15 # 1500 / 100
+			# block_size = 100
+			# for 7sec datasets
+			num_blocks = 7 # ((7 * 100) / 2) / 50 => (duration * samples)..
+			block_size = 50
+			mask = torch.tril(torch.ones(num_blocks, num_blocks), diagonal=0).repeat_interleave(block_size, dim=0).repeat_interleave(block_size, dim=1)
+			mask[mask == 0] = float('-inf')
+			mask[mask == 1] = 0
+			self.register_buffer('mask', mask, persistent=False)
+		else:
+			self.mask = None
 
 
 	def forward(self, x: Tensor):
@@ -180,7 +196,6 @@ class AudioEncoder(nn.Module):
 		x : torch.Tensor, shape = (batch_size, n_mels, n_ctx)
 			the mel spectrogram of the audio
 		"""
-
 		x = F.gelu(self.conv1(x))
 		x = F.gelu(self.conv2(x))
 		x = x.permute(0, 2, 1)
@@ -199,24 +214,25 @@ class AudioEncoder(nn.Module):
 
 class TextDecoder(nn.Module):
 	def __init__(
-		self, n_vocab: int, n_ctx: int, n_state: int, n_head: int, n_layers: int,
+		self, n_vocab: int, n_ctx: int, n_state: int,
+		n_head: int, n_layers: int, one_shot: bool
 	):
 		super().__init__()
+		self.one_shot = one_shot
 		self.tok_embs = nn.Embedding(n_vocab, n_state)
 		self.n_layers = n_layers
 		# NOTE: be careful with the positional embedding
 		self.pos_embs = nn.Parameter(torch.empty(n_ctx, n_state).fill_(0.001))
 
-		# self.dropout = nn.Dropout(0.1)
 		self.blocks: Iterable[ResidualAttentionBlock] = nn.ModuleList(
 			[
-				ResidualAttentionBlock(n_state, n_head, cross_attention=True, causalty=True)
+				ResidualAttentionBlock(n_state, n_head, cross_attention=True, causality='causal')
 				for _ in range(n_layers)
 			]
 		)
+
 		self.ln = LayerNorm(n_state)
-		# self.ln = LayerNorm(n_state)
-		# self.class_head = Linear(n_state + lang_dim, n_state)
+
 		mask = torch.empty(n_ctx, n_ctx).fill_(-np.inf).triu_(1)
 		self.register_buffer('mask', mask, persistent=False)
 
@@ -236,7 +252,7 @@ class TextDecoder(nn.Module):
 		'''
 		B, T = x.shape
 		x = (
-			self.tok_embs(x)
+			self.tok_embs(x) if not self.one_shot else self.tok_embs(torch.zeros_like(x).to(torch.int).to(x.device))
 			+ self.pos_embs[:T].view(1, T, -1)
 		)
 		x = x.to(xa.dtype)
@@ -244,6 +260,7 @@ class TextDecoder(nn.Module):
 		for i, block in enumerate(self.blocks):
 			x = block(x, xa, mask=self.mask)
 		x = self.ln(x)
+
 		logits = (
 			x @ torch.transpose(self.tok_embs.weight.to(x.dtype), 0, 1)
 		).float()
@@ -258,9 +275,9 @@ class Whisper(nn.Module):
 		self.encoder = AudioEncoder(
 			params.n_mels,
 			params.n_audio_ctx,
-			params.n_audio_state,
-			params.n_audio_head,
-			params.n_audio_layer,
+			params.dim,
+			params.nheads,
+			params.nlayers,
 			params.n_frames,
 			params.causal_mode,
 		)
@@ -268,9 +285,10 @@ class Whisper(nn.Module):
 		self.decoder = TextDecoder(
 			params.n_vocab,
 			params.n_text_ctx,
-			params.n_text_state,
-			params.n_text_head,
-			params.n_text_layer,
+			params.dim,
+			params.nheads,
+			params.nlayers,
+			params.one_shot,
 		)
 		self.apply(self._init_weights)
 		print("number of parameters: %.2fM" % (self.num_params()/1e6,))
@@ -316,10 +334,19 @@ class Whisper(nn.Module):
 			logits: torch.Tensor
 				The logits
 		'''
+		audio_features = self.embed_audio(mel)
+
+		if self.params.one_shot:
+			seq = torch.zeros(mel.size(0), self.params.seq_len).to(self.params.device)
+			logits = self.decoder(seq, audio_features)
+			probs = F.softmax(logits, dim=-1)
+			preds = torch.multinomial(probs.view(-1, probs.size(-1)), num_samples=1).view(-1)
+			return logits, preds.view(mel.size(0), -1)
+			
 		tokens = [self.params.text_process.sot_i]
 		seq = torch.tensor(tokens).view(1, 1).expand(mel.size(0), -1).to(self.params.device)
-		audio_features = self.embed_audio(mel)
-		for x in range(seq_len):
+
+		for x in range(seq_len - 1):
 			logits = self.decoder(seq, audio_features)
 			if sampling_method == 'greedy':
 				preds = torch.argmax(logits[:, -1:], dim=-1)
@@ -366,7 +393,7 @@ class Whisper(nn.Module):
 		else:
 			loss = F.cross_entropy(
 				logits.view(-1, self.vocab_size),
-				targets.flatten(),
+				targets.flatten() if not self.params.one_shot else tokens.flatten(),
 			)
 
 		return logits, loss
