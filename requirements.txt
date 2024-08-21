@@ -15,4 +15,5 @@ triton
 Ninja
 timm
 causal-conv1d
-mamba-ssm
+librosa
+matplotlib

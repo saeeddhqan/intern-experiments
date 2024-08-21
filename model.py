@@ -57,10 +57,10 @@ class MultiHeadAttention(nn.Module):
 	def __init__(self, n_state: int, n_head: int, causality: str):
 		super().__init__()
 		self.n_head = n_head
-		self.query = Linear(n_state, n_state, bias=False)
+		self.query = Linear(n_state, n_state)
 		self.key = Linear(n_state, n_state, bias=False)
-		self.value = Linear(n_state, n_state, bias=True)
-		self.out = Linear(n_state, n_state, bias=True)
+		self.value = Linear(n_state, n_state)
+		self.out = Linear(n_state, n_state)
 		self.causality = causality
 		if causality == 'semi-causal':
 			# for 30sec
@@ -105,17 +105,6 @@ class MultiHeadAttention(nn.Module):
 			return (w @ v).permute(0, 2, 3, 1, 4).flatten(start_dim=3).view(B, T, C)
 
 
-class NonLinear(nn.Module):
-	def __init__(self, n_state):
-		super().__init__()
-		self.dim = n_state
-		self.w1 = nn.Linear(self.dim, 4 * self.dim)
-		self.w2 = nn.Linear(4 * self.dim, self.dim)
-
-	def forward(self, x: Tensor):
-		return self.w2(F.gelu(self.w1(x)))
-
-
 class ResidualAttentionBlock(nn.Module):
 	def __init__(self, n_state: int, n_head: int, cross_attention: bool = False, causality: str = 'causal'):
 		super().__init__()
@@ -128,7 +117,10 @@ class ResidualAttentionBlock(nn.Module):
 		self.cross_attn_ln = LayerNorm(n_state) if cross_attention else None
 
 		n_mlp = n_state * 4
-		self.mlp = NonLinear(n_state)
+		self.mlp = nn.Sequential(
+            Linear(n_state, n_mlp), nn.GELU(), Linear(n_mlp, n_state)
+        )
+
 		self.mlp_ln = LayerNorm(n_state)
 
 	def forward(
@@ -171,8 +163,9 @@ class AudioEncoder(nn.Module):
 				causality=causality,
 				) for idx in range(n_layers)]
 		)
-		self.ln_encode = LayerNorm(n_state)
+
 		self.ln_post = LayerNorm(n_state)
+
 		if causality == 'causal':
 			mask = torch.empty(n_ctx, n_ctx).fill_(float('-inf')).triu_(1)
 			self.register_buffer('mask', mask, persistent=False)
@@ -199,8 +192,6 @@ class AudioEncoder(nn.Module):
 		x = F.gelu(self.conv1(x))
 		x = F.gelu(self.conv2(x))
 		x = x.permute(0, 2, 1)
-
-		x = self.ln_encode(x) # accelerates training
 
 		x = (x + self.positional_embedding).to(x.dtype)
 

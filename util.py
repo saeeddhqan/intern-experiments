@@ -9,7 +9,52 @@ from torch import Tensor, nn
 import torch.nn.functional as F
 import torchaudio
 import matplotlib.pyplot as plt
-import math, os, pathlib, random, argparse, json
+import math, os, pathlib, random, argparse, json, re
+import sentencepiece, datasets, tqdm, hashlib, urllib
+
+
+def download_whisper(url: str, root: str):
+	os.makedirs(root, exist_ok=True)
+
+	expected_sha256 = url.split("/")[-2]
+	download_target = os.path.join(root, os.path.basename(url))
+
+	if os.path.exists(download_target) and not os.path.isfile(download_target):
+		raise RuntimeError(f"{download_target} exists and is not a regular file")
+
+	if os.path.isfile(download_target):
+		with open(download_target, "rb") as f:
+			model_bytes = f.read()
+		if hashlib.sha256(model_bytes).hexdigest() == expected_sha256:
+			return download_target
+		else:
+			print(
+				f"{download_target} exists, but the SHA256 checksum does not match; re-downloading the file"
+			)
+
+	with urllib.request.urlopen(url) as source, open(download_target, "wb") as output:
+		with tqdm.tqdm(
+			total=int(source.info().get("Content-Length")),
+			ncols=80,
+			unit="iB",
+			unit_scale=True,
+			unit_divisor=1024,
+		) as loop:
+			while True:
+				buffer = source.read(8192)
+				if not buffer:
+					break
+
+				output.write(buffer)
+				loop.update(len(buffer))
+
+	model_bytes = open(download_target, "rb").read()
+	if hashlib.sha256(model_bytes).hexdigest() != expected_sha256:
+		raise RuntimeError(
+			"Model has been downloaded but the SHA256 checksum does not not match. Please retry loading the model."
+		)
+	return download_target
+
 
 
 
@@ -37,29 +82,34 @@ def get_logger(log_dir: str, name: str, log_filename: str = 'log', require_write
 
 
 class TextProcess:
-	def __init__(self) -> NoReturn:
-		self.sot = '<|start|>'
-		self.eot = '<|finish|>'
-		self.pad = '<|pad|>'
+	def __init__(self, tokenizer_model_path: str = '', digit_dataset: bool = True) -> NoReturn:
+		self.sot = '<s>'
+		self.eot = '</s>'
+		self.pad = '<pad>'
+		if digit_dataset:
+			chars = [self.sot, self.eot, self.pad]
+			self.chars = chars + sorted(list(set('0123456789')))
+			self.stoi = {x:i for i,x in enumerate(self.chars)}
+			self.itos = {i:x for i,x in enumerate(self.chars)}
+			self.encode = lambda s: [self.stoi[x] for x in s]
+			self.decode = lambda e: ''.join([self.itos[x] for x in e])
+			self.sot_i = self.stoi[self.sot]
+			self.eot_i = self.stoi[self.eot]
+			self.vocab_size = len(self.chars)
 
-		chars = [self.sot, self.eot, self.pad]
+			self.sot_i = 0
+			self.eot_i = 1
+			self.pad_i = 2
+		else:
+			self.tokenizer = sentencepiece.SentencePieceProcessor(model_file=tokenizer_model_path)
+			self.encode = self.tokenizer.encode
+			self.decode = lambda seq: self.tokenizer.decode(seq)
+			self.vocab_size = self.tokenizer.vocab_size()
+			self.sot_i = 1
+			self.eot_i = 2
+			self.pad_i = 3
 
-		self.chars = chars + sorted(list(set('0123456789')))
-
-		self.stoi = {x:i for i,x in enumerate(self.chars)}
-		self.itos = {i:x for i,x in enumerate(self.chars)}
-		self.encode = lambda s: [self.stoi[x] for x in s]
-		self.decode = lambda e: ''.join([self.itos[x] for x in e])
-		self.sot_i = self.stoi[self.sot]
-		self.eot_i = self.stoi[self.eot]
-
-		self.vocab_size = len(self.chars)
-
-		self.sot_i = 0
-		self.eot_i = 1
-		self.pad_i = 2
-		self.special_chars = frozenset({0, 1, 2})
-		self.clean = lambda s: s.replace(self.sot, '').replace(self.eot, '').replace(self.pad, '')
+		self.clean = lambda s: s.replace(self.sot, '').replace(self.eot, '')
 
 
 	def __len__(self) -> int:
@@ -324,11 +374,18 @@ class Config:
 				self.__data_dict__[k] = params[k]
 
 
+
+whisper_models = {
+	"tiny.en": "https://openaipublic.azureedge.net/main/whisper/models/d3dd57d32accea0b295c96e26691aa14d8822fac7d9d27d5dc00b4ca2826dd03/tiny.en.pt",
+	"small.en": "https://openaipublic.azureedge.net/main/whisper/models/f953ad0fd29cacd07d5a9eda5624af0f6bcf2258be67c92b79389873d91e0872/small.en.pt",
+	"small": "https://openaipublic.azureedge.net/main/whisper/models/9ecf779972d90ba49c06d968637d720dd632c55bbf19d441fb42bf17a411e794/small.pt",
+}
+
 SAMPLE_RATE = 16000
 N_FFT = 400 # win length
 N_MELS = 80
 HOP_LENGTH = 160
-CHUNK_LENGTH = 7 # supported duration (per second)
+CHUNK_LENGTH = 30 # supported duration (per second)
 N_SAMPLES = CHUNK_LENGTH * SAMPLE_RATE
 N_FRAMES = N_SAMPLES // HOP_LENGTH
 
@@ -336,11 +393,16 @@ N_SAMPLES_PER_TOKEN = HOP_LENGTH * 2  # the initial convolutions has stride 2
 FRAMES_PER_SECOND = SAMPLE_RATE // HOP_LENGTH  # 10ms per audio frame
 TOKENS_PER_SECOND = SAMPLE_RATE // N_SAMPLES_PER_TOKEN  # 20ms per audio token
 
-text_process = TextProcess()
+use_dataset = 'boolq'
+if use_dataset == 'boolq':
+	text_process = TextProcess(tokenizer_model_path='assets/boolq/boolq-tok-8k.model', digit_dataset=False)
+else:
+	text_process = TextProcess(digit_dataset=True)
+
 exact_div = lambda a, b: a // b
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 N_VOCABS = len(text_process)
-seqlen = 6
+seqlen = 32
 
 params = {
 	'model_name': 'Whisper',
@@ -399,6 +461,7 @@ params = {
 	'save_checkpoints': False,
 	'model_path': '',
 	'train_id': '',
+	'use_dataset': use_dataset,
 	'one_shot': False,
 	'fine_tune': False,
 	'no_footprint': False,
@@ -743,8 +806,8 @@ def log_mel_spectrogram(
 			cache[audio_path] = audio
 		else:
 			audio = cache[audio_path]
-	else:
-		raise ValueError('hehehe')
+	if isinstance(audio, np.ndarray):
+		audio = torch.from_numpy(audio)
 
 	if augmentator is not None:
 		audio = augmentator(audio.view(1, -1), before_or_after='before').view(-1)
@@ -769,7 +832,7 @@ def log_mel_spectrogram(
 
 
 def prepare_audio(
-	file_path: str,
+	audio: Union[str, np.ndarray, Tensor],
 	device: Union[str, torch.device],
 	augmentator: Optional[Union[None, Augmentator]] = None,
 ):
@@ -777,15 +840,19 @@ def prepare_audio(
 		Prepare the audio file for training.
 		Parameters
 		----------
-		file_path: str
-			The path to the audio file
+		audio:
+			The path to audio or either a NumPy array or Tensor containing the audio waveform in 16 kHz
+		device:
+			Device name
+		augmentator:
+			Augmentator class if any
 		Returns
 		-------
 		mel_segment: torch.Tensor, shape = (80, n_frames)
 			The log-Mel spectrogram of the audio segment
 	'''
 
-	mel = log_mel_spectrogram(file_path, padding=config.n_samples, device=device, augmentator=augmentator)
+	mel = log_mel_spectrogram(audio, padding=config.n_samples, device=device, augmentator=augmentator)
 	mel = pad_or_trim(mel, config.n_frames)
 
 	# if augmentator:
@@ -809,14 +876,14 @@ def prepare_text(text: str, device: Union[str, torch.device]):
 		labels: torch.Tensor, shape = (n_text_ctx,)
 	'''
 
-	sequence = [config.text_process.sot_i] + config.text_process.encode(text)
+	sequence = [config.text_process.sot_i] + config.text_process.encoder(text, config.seq_len - 1) # one for sot
 	labels = sequence[1:] + [config.text_process.eot_i]
 	sequence = torch.tensor(sequence).to(device)
 	labels = torch.tensor(labels).to(device)
 	return sequence, labels
 
 
-class Data(torch.utils.data.Dataset):
+class DataDigit(torch.utils.data.Dataset):
 	'''
 		Load the data from the json file.
 		The json file should be a list of objects with the following keys:
@@ -869,5 +936,56 @@ class Data(torch.utils.data.Dataset):
 		file_path = self.data[idx]['key']
 		mel_segment = prepare_audio(file_path, self.device, self.augmentator)
 		text = open(self.data[idx]['text']).read()
+		sequence, labels = prepare_text(text, self.device)
+		return mel_segment, sequence, labels
+
+
+class DataBoolq(torch.utils.data.Dataset):
+
+	def __init__(self, mode: str, device: Union[str, torch.device]):
+		self.device = device
+		self.text_process = config.text_process
+		self.data = []
+		self.mode = mode
+		ds = datasets.load_dataset('fixie-ai/boolq-audio')
+
+
+		self.augmentator = None
+		if self.mode == 'train_data':
+			self.augmentator = Augmentator()
+			self.data = ds['train']
+		else:
+			self.data = ds['validation']
+		self.data = self.data.remove_columns('answer')
+		self.data = self.data.remove_columns('passage')
+		self.data = self.data.remove_columns('explanation')
+
+
+	def normalizer(self, txt):
+		txt = re.sub(r'[\?,\.\:/\]\[\{\}\=\+\(\)\!\$\%\&\*\'\"]+', '', txt)
+		return txt.lower()
+
+
+	def __len__(self):
+		return len(self.data)
+
+
+	def __getitem__(self, idx: int):
+		'''
+			Returns
+			-------
+			mel_segment: torch.Tensor, shape = (80, n_frames)
+				The log-Mel spectrogram of the audio segment
+
+			sequence: torch.Tensor, shape = (n_text_ctx,)
+				The encoded text sequence
+
+			labels: torch.Tensor, shape = (n_text_ctx,)
+		'''
+		if torch.is_tensor(idx):
+			idx = idx.item()
+
+		text = self.normalizer(self.data[idx]['question'])
+		mel_segment = prepare_audio(np.float32(self.data[idx]['audio']['array']), self.device, self.augmentator)
 		sequence, labels = prepare_text(text, self.device)
 		return mel_segment, sequence, labels

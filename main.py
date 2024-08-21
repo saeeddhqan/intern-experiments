@@ -39,24 +39,24 @@ class Manager:
 		self.model = model
 		self.model.to(config.device)
 		self.mode = mode
+		datawrapper = util.DataBoolq if config.use_dataset == 'boolq' else util.DataDigit
 
 		self.dataset_train = DataLoader(
-			dataset=util.Data(config.train_path, config.device),
+			dataset=datawrapper(config.train_path, config.device),
 			batch_size=config.batch_size,
 			shuffle=True,
 		)
 		self.dataset_test = DataLoader(
-			dataset=util.Data(config.test_path, config.device),
+			dataset=datawrapper(config.test_path, config.device),
 			batch_size=config.batch_size,
 			shuffle=False,
 		)
 		self.dataset_ctest = DataLoader(
-			dataset=util.Data(config.test_path, config.device),
+			dataset=datawrapper(config.test_path, config.device),
 			batch_size=1,
 			shuffle=False,
 		)
-		self.preprocess_encoder = util.prepare_audio
-		self.preprocess_decoder = util.prepare_text
+
 		self.checkpoints = {}
 		self.checkpoints_path = None
 		self.model_path_format = None
@@ -204,7 +204,12 @@ class Manager:
 		'''
 			Load a model.
 		'''
-
+		if path in ('tiny.en', 'small', 'small.en'):
+			path = util.download_whisper(util.whisper_models[path], 'whisper_models')
+			checkpoint = torch.load(path)['model_state_dict']
+			# only loading encoder weights
+			self.model.encoder.load_state_dict({x.replace('encoder.', ''):checkpoint[x] for x in checkpoint if x.startswith('encoder')})
+			return
 		try:
 			checkpoint = torch.load(path)
 			self.model.load_state_dict(checkpoint['model'])
@@ -274,7 +279,7 @@ class Manager:
 						labels,
 					)
 				losses[k] = loss.item()
-				if k == steps:
+				if k + 1 == losses.size(0):
 					break
 			out[split[0]] = losses.mean()
 
@@ -307,7 +312,7 @@ class Manager:
 		self.model.train()
 
 
-	def train_loop(self):
+	def train_loop(self, epoch):
 		'''
 			Train loop.
 		'''
@@ -352,7 +357,7 @@ class Manager:
 		for epoch in range(config.epoch):
 			test_cond = epoch % config.test_freq == config.test_freq - 1
 			try:
-				self.train_loop()
+				self.train_loop(epoch)
 				if test_cond:
 					self.test(epoch=epoch, step=len(self.dataset_train), mode='main')
 			except KeyboardInterrupt:
@@ -377,13 +382,14 @@ class Manager:
 		'''
 		self.before_test()
 
-
-		all_data_size = n_samples if n_samples > 0 else len(self.dataset_ctest)
+		n_samples = n_samples if n_samples > 0 else 128
+		n_samples = min(len(self.dataset_ctest), n_samples)
 		results = {}
 		all_r = []
 		all_h = []
 		total_time = 0
 		print_steps = 4
+		took_tests = 0
 		for step, chunk in enumerate(self.dataset_ctest):
 			mel, sequence, labels = chunk
 			start = time.perf_counter()
@@ -405,18 +411,19 @@ class Manager:
 			if step < print_steps:
 				config.logger.info(f"real: {groundtruth}")
 				config.logger.info(f"got: {text}")
+			took_tests += 1
 			if step == n_samples:
 				break
 
 		accuracy, performance, _, _, wer = util.overall_accuracy(all_r, all_h)
-		time_per_sample = total_time / all_data_size
+		time_per_sample = total_time / took_tests
 
 		results['total_time'] = total_time
 		results['accuracy'] = accuracy
 		results['performance'] = performance
 		results['wer'] = wer
 		results['time_per_sample'] = time_per_sample
-		results['all_data_size'] = all_data_size
+		results['n_samples'] = took_tests
 
 		config.logger.info(f"\t\twer({mode}): {round(wer, 4)}")
 		config.logger.info(f"\t\taccuracy({mode}): {round(accuracy, 4)}")
