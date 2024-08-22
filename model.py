@@ -54,7 +54,7 @@ class RMSNorm(nn.Module):
 
 
 class MultiHeadAttention(nn.Module):
-	def __init__(self, n_state: int, n_head: int, causality: str):
+	def __init__(self, n_state: int, n_head: int, causality: str, nblocks: int = None, bsize: int = None):
 		super().__init__()
 		self.n_head = n_head
 		self.query = Linear(n_state, n_state)
@@ -63,12 +63,8 @@ class MultiHeadAttention(nn.Module):
 		self.out = Linear(n_state, n_state)
 		self.causality = causality
 		if causality == 'semi-causal':
-			# for 30sec
-			# self.nblocks = 15 # 15 * 100 == 1500 for 30 seconds of audio
-			# self.bsize = 100 # n of samples for each second
-			# for 7sec
-			self.nblocks = 7
-			self.bsize = 50
+			self.nblocks = nblocks
+			self.bsize = bsize
 
 	def forward(
 		self,
@@ -106,9 +102,9 @@ class MultiHeadAttention(nn.Module):
 
 
 class ResidualAttentionBlock(nn.Module):
-	def __init__(self, n_state: int, n_head: int, cross_attention: bool = False, causality: str = 'causal'):
+	def __init__(self, n_state: int, n_head: int, cross_attention: bool = False, causality: str = 'causal', nblocks: int = None, bsize: int = None):
 		super().__init__()
-		self.attn = MultiHeadAttention(n_state, n_head, causality=causality)
+		self.attn = MultiHeadAttention(n_state, n_head, causality=causality, nblocks=nblocks, bsize=bsize)
 		self.attn_ln = LayerNorm(n_state, eps=1e-8)
 
 		self.cross_attn = (
@@ -118,8 +114,8 @@ class ResidualAttentionBlock(nn.Module):
 
 		n_mlp = n_state * 4
 		self.mlp = nn.Sequential(
-            Linear(n_state, n_mlp), nn.GELU(), Linear(n_mlp, n_state)
-        )
+			Linear(n_state, n_mlp), nn.GELU(), Linear(n_mlp, n_state)
+		)
 
 		self.mlp_ln = LayerNorm(n_state)
 
@@ -148,7 +144,7 @@ def sinusoids(length, channels, max_timescale=10000):
 
 class AudioEncoder(nn.Module):
 	def __init__(
-		self, n_mels: int, n_ctx: int, n_state: int, n_head: int, n_layers: int, n_frames: int,	causality: str,
+		self, n_mels: int, n_ctx: int, n_state: int, n_head: int, n_layers: int, n_frames: int,	causality: str, dataset: str,
 	):
 		super().__init__()
 
@@ -156,32 +152,40 @@ class AudioEncoder(nn.Module):
 		self.conv1 = Conv1d(n_mels, n_state, kernel_size=3, padding=1)
 		self.conv2 = Conv1d(n_state, n_state, kernel_size=3, stride=2, padding=1)
 		self.register_buffer('positional_embedding', sinusoids(n_ctx, n_state))
-
-		self.blocks: Iterable[ResidualAttentionBlock] = nn.ModuleList(
-			[ResidualAttentionBlock(n_state,
-				n_head,
-				causality=causality,
-				) for idx in range(n_layers)]
-		)
-
-		self.ln_post = LayerNorm(n_state)
+		nblocks = None
+		bsize = None
 
 		if causality == 'causal':
 			mask = torch.empty(n_ctx, n_ctx).fill_(float('-inf')).triu_(1)
 			self.register_buffer('mask', mask, persistent=False)
 		elif causality == 'bw-semi-causal':
-			# for 30sec datasets
-			# num_blocks = 15 # 1500 / 100
-			# block_size = 100
-			# for 7sec datasets
-			num_blocks = 7 # ((7 * 100) / 2) / 50 => (duration * samples)..
-			block_size = 50
-			mask = torch.tril(torch.ones(num_blocks, num_blocks), diagonal=0).repeat_interleave(block_size, dim=0).repeat_interleave(block_size, dim=1)
+			nblocks = 15 if dataset == 'boolq' else 7
+			bsize = 100 if dataset == 'boolq' else 50
+			mask = torch.tril(torch.ones(nblocks, nblocks), diagonal=0).repeat_interleave(bsize, dim=0).repeat_interleave(bsize, dim=1)
 			mask[mask == 0] = float('-inf')
 			mask[mask == 1] = 0
 			self.register_buffer('mask', mask, persistent=False)
+		elif causality == 'semi-causal':
+			nblocks = 15 if dataset == 'boolq' else 7
+			bsize = 100 if dataset == 'boolq' else 50
+			self.mask = None
 		else:
 			self.mask = None
+
+
+
+		self.blocks: Iterable[ResidualAttentionBlock] = nn.ModuleList(
+			[ResidualAttentionBlock(n_state,
+				n_head,
+				causality=causality,
+				nblocks=nblocks,
+				bsize=bsize,
+				) for idx in range(n_layers)]
+		)
+
+		self.ln_post = LayerNorm(n_state)
+
+
 
 
 	def forward(self, x: Tensor):
@@ -271,6 +275,7 @@ class Whisper(nn.Module):
 			params.nlayers,
 			params.n_frames,
 			params.causal_mode,
+			params.use_dataset,
 		)
 
 		self.decoder = TextDecoder(
