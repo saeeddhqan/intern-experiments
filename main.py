@@ -41,7 +41,15 @@ class Manager:
 		self.model = model
 		self.model.to(config.device)
 		self.mode = mode
-		datawrapper = util.DataBoolq if config.dataset_name == 'boolq' else util.DataDigits
+		match config.dataset_name:
+			case 'boolq':
+				datawrapper = util.DataBoolq
+			case 'librispeech10h':
+				datawrapper = util.DataLibSpeech10h
+			case 'digits':
+				datawrapper = util.DataDigits
+			case _:
+				raise NotImplementedError('provide a supported dataset name')
 
 		self.dataset_train = DataLoader(
 			dataset=datawrapper(config.train_path, config.device),

@@ -11,7 +11,7 @@ import torchaudio
 import matplotlib.pyplot as plt
 import math, os, pathlib, random, argparse, json, re
 import sentencepiece, datasets, tqdm, hashlib, urllib
-
+import tokenizer
 
 
 class Config:
@@ -63,11 +63,13 @@ class Config:
 
 
 class TextProcess:
-	def __init__(self, tokenizer_model_path: str = '', digits_dataset: bool = True) -> NoReturn:
+	def __init__(self, tokenizer_model_path: str = '', tokenizer_type: bool = True) -> NoReturn:
 		self.sot = '<s>'
 		self.eot = '</s>'
 		self.pad = '<pad>'
-		if digits_dataset:
+		self.etc = ''
+		self.tokenizer_type = tokenizer_type
+		if tokenizer_type == 'digits':
 			chars = [self.sot, self.eot, self.pad]
 			self.chars = chars + sorted(list(set('0123456789')))
 			self.stoi = {x:i for i,x in enumerate(self.chars)}
@@ -81,6 +83,18 @@ class TextProcess:
 			self.sot_i = 0
 			self.eot_i = 1
 			self.pad_i = 2
+		elif tokenizer_type == 'whisper':
+			self.tokenizer = tokenizer.get_tokenizer(False, num_languages=1, language='en', task='transcribe')
+			self.encode = self.tokenizer.encode
+			self.decode = self.tokenizer.decode
+			self.vocab_size = self.tokenizer.encoding.n_vocab
+			self.sot_i = list(self.tokenizer.sot_sequence_including_notimestamps)
+			self.eot_i = self.tokenizer.eot
+			self.pad_i = self.tokenizer.no_speech
+			self.sot = '<|startoftranscript|>'
+			self.eot = '<|endoftext|>'
+			self.pad = '<|nospeech|>'
+			self.etc = '<|notimestamps|>'
 		else:
 			self.tokenizer = sentencepiece.SentencePieceProcessor(model_file=tokenizer_model_path)
 			self.encode = self.tokenizer.encode
@@ -90,7 +104,7 @@ class TextProcess:
 			self.eot_i = 2
 			self.pad_i = 3
 
-		self.clean = lambda s: s.replace(self.sot, '').replace(self.eot, '').replace(self.pad, '')
+		self.clean = lambda s: s.replace(self.sot, '').replace(self.eot, '').replace(self.pad, '').replace(self.etc, '')
 
 
 	def __len__(self) -> int:
@@ -108,12 +122,14 @@ class TextProcess:
 		'''
 		text = text.replace('\n', '')
 		text = [x for x in self.encode(text)]
-
-		text.insert(self.sot_i, 0)
+		if self.tokenizer_type == 'whisper':
+			text = self.sot_i + text
+		else:
+			text.insert(self.sot_i, 0)
 
 		if len(text) < block_size:
+			text.extend([self.pad_i for _ in range((block_size - len(text)) - 1)])
 			text.append(self.eot_i)
-			text.extend([self.pad_i for _ in range(block_size - len(text))])
 			return text
 		elif len(text) >= block_size:
 			print(f'[{len(text)}]cutting...')
@@ -177,9 +193,12 @@ def download_whisper(url: str, root: str) -> str:
 	return download_target
 
 
-def get_logger(log_dir: str, name: str,
+def get_logger(
+	log_dir: str,
+	name: str,
 	log_filename: str = 'log',
-	require_writer: bool = True) -> ClassVar:
+	require_writer: bool = True,
+) -> ClassVar:
 
 	os.makedirs(log_dir, exist_ok=True)
 
@@ -365,14 +384,18 @@ def plot_metrics(metrics_list: Dict, train_id: str) -> Tuple:
 
 
 def set_dataset_specifiers() -> NoReturn:
-	if config.dataset_name != 'digits':
-		text_process = TextProcess(tokenizer_model_path='assets/boolq/boolq-tok-8k.model', digits_dataset=False)
+	if config.dataset_name == 'digits':
+		text_process = TextProcess(tokenizer_type='digits')
+		CHUNK_LENGTH = 7
+		seqlen = 7
+	elif config.dataset_name == 'boolq':
+		text_process = TextProcess(tokenizer_model_path='assets/boolq/boolq-tok-8k.model', tokenizer_type='sp')
 		CHUNK_LENGTH = 30
 		seqlen = 32
 	else:
-		text_process = TextProcess(digits_dataset=True)
-		CHUNK_LENGTH = 7
-		seqlen = 7
+		text_process = TextProcess(tokenizer_type='whisper')
+		CHUNK_LENGTH = 30
+		seqlen = 128
 
 	SAMPLE_RATE = 16000
 	N_SAMPLES = CHUNK_LENGTH * SAMPLE_RATE
@@ -615,7 +638,12 @@ def load_audio(file: str, sr: int = config.sample_rate) -> np.ndarray:
 	return np.frombuffer(out, np.int16).flatten().astype(np.float32) / 32768.0
 
 
-def pad_or_trim(array, length: int = config.n_samples, *, axis: int = -1) -> Tensor:
+def pad_or_trim(
+	array,
+	length: int = config.n_samples,
+	*,
+	axis: int = -1,
+) -> Tensor:
 	if torch.is_tensor(array):
 		if array.shape[axis] > length:
 			array = array.index_select(
@@ -846,6 +874,46 @@ class DataBoolq(torch.utils.data.Dataset):
 			idx = idx.item()
 
 		text = self.normalizer(self.data[idx]['question'])
+		mel_segment = prepare_audio(np.float32(self.data[idx]['audio']['array']), self.device, self.augmentator)
+		sequence, labels = prepare_text(text, self.device)
+		return mel_segment, sequence, labels
+
+
+class DataLibSpeech10h(torch.utils.data.Dataset):
+
+	def __init__(self, mode: str, device: Union[str, torch.device]) -> NoReturn:
+		self.device = device
+		self.text_process = config.text_process
+		self.data = []
+		self.mode = mode
+		ds = datasets.load_dataset('ahazeemi/librispeech10h')
+
+		self.augmentator = None
+		if self.mode == 'train_data':
+			self.augmentator = Augmentator()
+			self.data = ds['train.10']
+		else:
+			self.data = ds['validation']
+		self.data = self.data.remove_columns('speaker_id')
+		self.data = self.data.remove_columns('chapter_id')
+		self.data = self.data.remove_columns('id')
+		self.data = self.data.remove_columns('file')
+
+
+	def normalizer(self, txt: str) -> str:
+		txt = re.sub(r'[\?,\.\:/\]\[\{\}\=\+\(\)\!\$\%\&\*\'\"]+', '', txt)
+		return txt.lower()
+
+
+	def __len__(self) -> int:
+		return len(self.data)
+
+
+	def __getitem__(self, idx: int) -> Tuple[Tensor, Tensor, Tensor]:
+		if torch.is_tensor(idx):
+			idx = idx.item()
+
+		text = self.normalizer(self.data[idx]['text'])
 		mel_segment = prepare_audio(np.float32(self.data[idx]['audio']['array']), self.device, self.augmentator)
 		sequence, labels = prepare_text(text, self.device)
 		return mel_segment, sequence, labels
