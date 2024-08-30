@@ -288,8 +288,8 @@ class Whisper(nn.Module):
 
 	def num_params(self) -> int:
 		n_params = sum(p.numel() for p in self.parameters())
-		n_params -= self.decoder.pos_embs.numel()
-		n_params -= self.decoder.tok_embs.weight.numel()
+		n_params -= self.decoder.positional_embedding.numel()
+		n_params -= self.decoder.token_embedding.weight.numel()
 		return n_params
 
 
@@ -328,7 +328,7 @@ class Whisper(nn.Module):
 			return logits, preds.view(mel.size(0), -1)
 			
 		tokens = [self.params.text_process.sot_i]
-		seq = torch.tensor(tokens).view(1, 1).expand(mel.size(0), -1).to(self.params.device)
+		seq = torch.tensor(tokens).flatten().view(1, -1).expand(mel.size(0), -1).to(self.params.device)
 		for x in range(seq_len - 1):
 			logits = self.decoder(seq, audio_features)
 			if sampling_method == 'greedy':

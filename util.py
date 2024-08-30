@@ -384,6 +384,7 @@ def plot_metrics(metrics_list: Dict, train_id: str) -> Tuple:
 
 
 def set_dataset_specifiers() -> NoReturn:
+	extra = 0
 	if config.dataset_name == 'digits':
 		text_process = TextProcess(tokenizer_type='digits')
 		CHUNK_LENGTH = 7
@@ -395,7 +396,8 @@ def set_dataset_specifiers() -> NoReturn:
 	else:
 		text_process = TextProcess(tokenizer_type='whisper')
 		CHUNK_LENGTH = 30
-		seqlen = 128
+		seqlen = 448
+		extra = 98
 
 	SAMPLE_RATE = 16000
 	N_SAMPLES = CHUNK_LENGTH * SAMPLE_RATE
@@ -408,7 +410,7 @@ def set_dataset_specifiers() -> NoReturn:
 	TOKENS_PER_SECOND = SAMPLE_RATE // N_SAMPLES_PER_TOKEN  # 20ms per audio token
 	config.seqlen = seqlen
 	config.text_process = text_process
-	config.n_vocab = len(text_process)
+	config.n_vocab = len(text_process) + extra
 	config.chunk_length = CHUNK_LENGTH
 	config.n_samples = N_SAMPLES
 	config.n_frames = N_FRAMES
