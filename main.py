@@ -414,9 +414,10 @@ class Manager:
 		for step, chunk in enumerate(self.dataset_test):
 			mel, sequence, labels = chunk
 			start = time.perf_counter()
-			_, seqx = self.model.inference(
+			seqx = self.model.inference(
 				mel,
 				config.n_text_ctx,
+				config.text_process.eot_i,
 			)
 			end = time.perf_counter()
 			total_time += end - start
@@ -487,16 +488,16 @@ class Manager:
 
 			while True:
 				voice_path = input('Voice path: ')
-				mel = util.prepare_audio(voice_path, 'cuda').unsqueeze(0)
-				for method in ('multinomial', 'top-k', 'greedy'):
-					print('Using ', method)
-					_, seqx = self.model.inference(
-						mel,
-						config.block_size,
-						method
-					)
-					text = config.text_process.decoder(seqx[0].tolist(), True)
-					print('\t', text)
+				mel = util.prepare_audio(voice_path, 'cuda').unsqueeze(0).to(config.dtype)
+				print('Using "greedy" for sampling')
+				seqx = self.model.inference(
+					mel,
+					config.n_text_ctx,
+					config.text_process.eot_i,
+					batch_process=False,
+				)
+				text = config.text_process.decoder(seqx[0].tolist(), remove_special_chars=True)
+				print('\t', text)
 
 
 if __name__ == '__main__':
@@ -537,6 +538,9 @@ if __name__ == '__main__':
 
 	if config.action in ('test', 'live'):
 		config.no_footprint = True
+		if config.model_path in ('', None):
+			print('provide a model with --model_path')
+			exit()
 
 	whisper = model.Whisper(config)
 	manager = Manager(whisper, mode=args.action)

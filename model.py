@@ -205,7 +205,6 @@ class AudioEncoder(nn.Module):
 		x = (x + self.positional_embedding).to(x.dtype)
 
 		assert x.shape[1:] == self.positional_embedding.shape, 'incorrect audio shape'
-
 		for i, block in enumerate(self.blocks):
 			x = block(x, mask=self.mask)
 		x = self.ln_post(x)
@@ -220,7 +219,7 @@ class TextDecoder(nn.Module):
 		super().__init__()
 		self.one_shot = one_shot
 		self.token_embedding = nn.Embedding(n_vocab, n_state)
-		self.positional_embedding = nn.Parameter(torch.empty(n_ctx, n_state).fill_(0.001))
+		self.positional_embedding = nn.Parameter(torch.empty(n_ctx, n_state)) # warn
 		self.n_layers = n_layers
 
 		self.blocks = nn.ModuleList(
@@ -242,10 +241,11 @@ class TextDecoder(nn.Module):
 
 	def forward(self, x: Tensor, xa: Tensor) -> Tensor:
 		B, T = x.shape
-		x = (
-			self.token_embedding(x) if not self.one_shot else self.token_embedding(torch.zeros_like(x).to(torch.int).to(x.device))
-			+ self.positional_embedding[:T].view(1, T, -1)
-		)
+
+		if self.one_shot:
+			x = torch.zeros_like(x).to(torch.int).to(x.device)
+
+		x = self.token_embedding(x) + self.positional_embedding[:T].view(1, T, -1)
 		x = x.to(xa.dtype)
 
 		for i, block in enumerate(self.blocks):
@@ -313,22 +313,26 @@ class Whisper(nn.Module):
 
 	@torch.no_grad()
 	def inference(self,
-		mel: Tensor,
+		audio_features: Tensor,
 		seq_len: int,
+		eot: int,
+		batch_process: bool = True,
 	) -> Tuple:
 
-		audio_features = self.embed_audio(mel)
-		sampling_method = 'multinomial'
-
+		audio_features = self.embed_audio(audio_features)
+		sampling_method = 'greedy'
+		B = audio_features.size(0)
 		if self.params.one_shot:
-			seq = torch.zeros(mel.size(0), self.params.seq_len).to(self.params.device)
+			seq = torch.zeros(B, self.params.seq_len).to(self.params.device)
 			logits = self.decoder(seq, audio_features)
 			probs = F.softmax(logits, dim=-1)
 			preds = torch.multinomial(probs.view(-1, probs.size(-1)), num_samples=1).view(-1)
-			return logits, preds.view(mel.size(0), -1)
+			return logits, preds.view(B, -1)
 			
 		tokens = [self.params.text_process.sot_i]
-		seq = torch.tensor(tokens).flatten().view(1, -1).expand(mel.size(0), -1).to(self.params.device)
+		seq = torch.tensor(tokens).flatten().view(1, -1).expand(B, -1).to(self.params.device)
+		seq_len -= seq.size(1)
+
 		for x in range(seq_len - 1):
 			logits = self.decoder(seq, audio_features)
 			if sampling_method == 'greedy':
@@ -342,8 +346,10 @@ class Whisper(nn.Module):
 				preds = torch.multinomial(top_k_probs, num_samples=1)
 				preds = top_k_indices.gather(-1, preds)
 			seq = torch.cat((seq, preds), dim=1)
-
-		return logits, seq
+			if batch_process is False:
+				if preds[0, 0] == eot:
+					break
+		return seq
 
 
 	def forward(self, 

@@ -79,16 +79,15 @@ class TextProcess:
 			self.sot_i = self.stoi[self.sot]
 			self.eot_i = self.stoi[self.eot]
 			self.vocab_size = len(self.chars)
-
 			self.sot_i = 0
 			self.eot_i = 1
 			self.pad_i = 2
 		elif tokenizer_type == 'whisper':
-			self.tokenizer = tokenizer.get_tokenizer(False, num_languages=1, language='en', task='transcribe')
+			self.tokenizer = tokenizer.get_tokenizer(False, num_languages=99, language='en', task='transcribe')
 			self.encode = self.tokenizer.encode
 			self.decode = self.tokenizer.decode
 			self.vocab_size = self.tokenizer.encoding.n_vocab
-			self.sot_i = list(self.tokenizer.sot_sequence_including_notimestamps)
+			self.sot_i = list(self.tokenizer.sot_sequence)
 			self.eot_i = self.tokenizer.eot
 			self.pad_i = self.tokenizer.no_speech
 			self.sot = '<|startoftranscript|>'
@@ -397,7 +396,6 @@ def set_dataset_specifiers() -> NoReturn:
 		text_process = TextProcess(tokenizer_type='whisper')
 		CHUNK_LENGTH = 30
 		seqlen = 448
-		extra = 98
 
 	SAMPLE_RATE = 16000
 	N_SAMPLES = CHUNK_LENGTH * SAMPLE_RATE
@@ -451,7 +449,7 @@ params = {
 	'n_samples': None,
 	'n_frames': None,
 	'accumulation_steps': 1,
-	'dtype': torch.float32,
+	'dtype': torch.float16,
 	'dim': 64,
 	'nlayers': 4,
 	'nheads': 2,
@@ -838,7 +836,7 @@ class DataDigits(torch.utils.data.Dataset):
 		mel_segment = prepare_audio(file_path, self.device, self.augmentator)
 		text = open(self.data[idx]['text']).read()
 		sequence, labels = prepare_text(text, self.device)
-		return mel_segment, sequence, labels
+		return mel_segment.to(config.dtype), sequence, labels
 
 
 class DataBoolq(torch.utils.data.Dataset):
@@ -878,7 +876,7 @@ class DataBoolq(torch.utils.data.Dataset):
 		text = self.normalizer(self.data[idx]['question'])
 		mel_segment = prepare_audio(np.float32(self.data[idx]['audio']['array']), self.device, self.augmentator)
 		sequence, labels = prepare_text(text, self.device)
-		return mel_segment, sequence, labels
+		return mel_segment.to(config.dtype), sequence, labels
 
 
 class DataLibSpeech10h(torch.utils.data.Dataset):
@@ -918,4 +916,4 @@ class DataLibSpeech10h(torch.utils.data.Dataset):
 		text = self.normalizer(self.data[idx]['text'])
 		mel_segment = prepare_audio(np.float32(self.data[idx]['audio']['array']), self.device, self.augmentator)
 		sequence, labels = prepare_text(text, self.device)
-		return mel_segment, sequence, labels
+		return mel_segment.to(config.dtype), sequence, labels
