@@ -217,10 +217,19 @@ class Manager:
 		if path in ('tiny.en', 'small', 'small.en'):
 			path = util.download_whisper(util.whisper_models[path], 'whisper_models')
 			checkpoint = torch.load(path)['model_state_dict']
-			# loading encoder weights
-			self.model.encoder.load_state_dict({x.replace('encoder.', ''):checkpoint[x] for x in checkpoint if x.startswith('encoder')})
-			# and decoder weights
-			self.model.decoder.load_state_dict({x.replace('decoder.', ''):checkpoint[x] for x in checkpoint if x.startswith('decoder')})
+			# loading weights
+			encoder = {}
+			decoder = {}
+			for x in checkpoint:
+				if x.startswith('encoder'):
+					encoder[x.replace('encoder.', '')] = checkpoint[x]
+				elif x.startswith('decoder'):
+					if 'positional_embedding' in x:
+						decoder[x.replace('decoder.', '')] = checkpoint[x][:config.n_text_ctx]
+					else:
+						decoder[x.replace('decoder.', '')] = checkpoint[x]
+			self.model.encoder.load_state_dict(encoder)
+			self.model.decoder.load_state_dict(decoder)
 			return
 		try:
 			checkpoint = torch.load(path)

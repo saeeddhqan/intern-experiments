@@ -105,7 +105,6 @@ class TextProcess:
 
 		self.clean = lambda s: s.replace(self.sot, '').replace(self.eot, '').replace(self.pad, '').replace(self.etc, '')
 
-
 	def __len__(self) -> int:
 		return self.vocab_size
 
@@ -395,7 +394,7 @@ def set_dataset_specifiers() -> NoReturn:
 	else:
 		text_process = TextProcess(tokenizer_type='whisper')
 		CHUNK_LENGTH = 30
-		seqlen = 448
+		seqlen = 128
 
 	SAMPLE_RATE = 16000
 	N_SAMPLES = CHUNK_LENGTH * SAMPLE_RATE
@@ -891,9 +890,9 @@ class DataLibSpeech10h(torch.utils.data.Dataset):
 		self.augmentator = None
 		if self.mode == 'train_data':
 			self.augmentator = Augmentator()
-			self.data = ds['train.10']
+			self.data = datasets.concatenate_datasets([ds['train.10'], ds['validation']])
 		else:
-			self.data = ds['validation']
+			self.data = ds['test']
 		self.data = self.data.remove_columns('speaker_id')
 		self.data = self.data.remove_columns('chapter_id')
 		self.data = self.data.remove_columns('id')
