@@ -275,7 +275,7 @@ class Manager:
 			if config.no_footprint:
 				return
 			self.save_checkpoints()
-			epoch, wer, train_loss, test_loss, key = util.plot_metrics(self.metrics, self.train_id)
+			wer, train_loss, test_loss, key = util.plot_metrics(self.metrics, self.train_id)
 			with open('results/results.csv', 'a') as fp:
 				mtps = sum(self.metrics['time_per_sample']) / len(self.metrics['time_per_sample'])
 				rtf = mtps / config.chunk_length
@@ -378,7 +378,7 @@ class Manager:
 
 			epoch_loss += loss.detach()
 			print(step, end='\r')
-			if step % 100 == 99:
+			if step % 300 == 299:
 				self.test(epoch=epoch, step=step, mode='micro')
 			self.steps += 1
 
@@ -435,7 +435,7 @@ class Manager:
 			preds_text = []
 			groundtruth_text = []
 			for b in range(mel.size(0)):
-				_, groundtruth, pred = self.decode_single_item(preds[b], labels[b])
+				groundtruth, pred = self.decode_single_item(preds[b], labels[b])
 				preds_text.append(pred)
 				groundtruth_text.append(groundtruth)
 			all_wer.append(util.wer_calculate(preds_text, groundtruth_text).item())
@@ -472,8 +472,7 @@ class Manager:
 	def decode_single_item(self, seq: Tensor, labels: Tensor) -> Tuple:
 		pred = config.text_process.decoder(seq, remove_special_chars=True)
 		groundtruth = config.text_process.decoder(labels, remove_special_chars=True)
-		# wer = util.wer_calculate(pred, groundtruth)
-		return 0, groundtruth, pred
+		return groundtruth, pred
 
 
 	@torch.no_grad()
@@ -511,7 +510,7 @@ if __name__ == '__main__':
 	parser.add_argument('--wandb', action='store_true', default=config.wandb, help='use wandb')
 	parser.add_argument('--save_checkpoints', action='store_true', default=config.save_checkpoints, help='save checkpoints')
 	parser.add_argument('--model_path', type=str, default=config.model_path, help='which model do you want to test')
-	parser.add_argument('--dataset_name', type=str, default=config.dataset_name, help="which dataset do you want to train/test('digits', 'boolq')")
+	parser.add_argument('--dataset_name', type=str, default=config.dataset_name, help="which dataset do you want to train/test('librispeech10h', 'boolq')")
 	parser.add_argument('--accumulation_steps', '-as', type=int, default=config.accumulation_steps, help='accumulation steps')
 	parser.add_argument('--non_ar', action='store_true', default=config.non_ar, help='use non auto regressive method')
 	parser.add_argument('--fine_tune', action='store_true', default=config.fine_tune, help='for fine tune')

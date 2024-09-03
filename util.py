@@ -235,38 +235,32 @@ def plot_metrics(metrics_list: Dict, train_id: str) -> Tuple:
 	"""
 
 	key_plot = 'micro' if config.epoch < 50 and len(metrics_list['micro']) > 0 else 'main'
-	order = ('main', 'micro') if key_plot == 'micro' else ('micro', 'main')
-	best_metrics = (0,0,0,key_plot)
-	min_wer = float('inf')
-	content = []
+	best_metrics = (-1, -1, -1, key_plot)
+	if metrics_list['main'] == [] and metrics_list['micro'] == []:
+		return best_metrics
+	wer = [t[4] for t in metrics_list['main']] + [t[4] for t in metrics_list['micro']]
+	min_wer = min(wer)
 
-	for key in order:
-		epochs = [t[0] for t in metrics_list[key]]
-		steps = [t[1] for t in metrics_list[key]]
-		train_losses = [t[2].item() for t in metrics_list[key]]
-		test_losses = [t[3].item() for t in metrics_list[key]]
-		wer = [t[4] for t in metrics_list[key]]
+	train_losses = {'main': [], 'micro': []}
+	test_losses = {'main': [], 'micro': []}
+	wers = {'main': [], 'micro': []}
+	for key in metrics_list:
+		for t in metrics_list[key]:
+			if t[4] == min_wer:
+				best_metrics = (min_wer, t[2].item(), t[3].item(), key)
+			train_losses[key].append(t[2].item())
+			test_losses[key].append(t[3].item())
+			wers[key].append(t[4].item())
 
-		content.append({
-			f"train_losses_{key}": train_losses,
-			f"test_losses_{key}": test_losses,
-			f"wer_{key}": wer,
-		})
-		if wer == []:
-			continue
-		if min(wer) < min_wer:
-			min_wer = min(wer)
-			min_index = wer.index(min_wer)
-			best_metrics = (min_wer, train_losses[min_index], test_losses[min_index], key_plot)
-	print(content)
-	json.dump(content, open(f"logs/{train_id}.json", 'w'))
+
+	json.dump([train_losses, test_losses, wers], open(f"logs/{train_id}.json", 'w'))
 
 	config.logger.info(f"Using {key_plot} for plots")
 
-	combined_epochs = np.array(epochs) + np.array(steps) / max(steps) if key_plot == 'micro' else epochs
+	combined_steps = np.arange(len(train_losses[key_plot]))
 
-	plt.plot(combined_epochs, train_losses, label='Train Loss')
-	plt.plot(combined_epochs, test_losses, label='Test Loss')
+	plt.plot(combined_steps, train_losses[key_plot], label='Train Loss')
+	plt.plot(combined_steps, test_losses[key_plot], label='Test Loss')
 	plt.title('Loss')
 	plt.xlabel('Epoch')
 	plt.ylabel('Loss')
@@ -275,7 +269,7 @@ def plot_metrics(metrics_list: Dict, train_id: str) -> Tuple:
 	plt.savefig(f"logs/{train_id}_loss.png")
 	plt.clf()
 
-	plt.plot(combined_epochs, wer)
+	plt.plot(combined_steps, wers[key_plot])
 	plt.title('Word Error Rate')
 	plt.xlabel('Epoch')
 	plt.ylabel('WER')
@@ -337,7 +331,7 @@ params = {
 	'batch_size': 16,
 	'seqlen': None,
 	'n_vocab': None,
-	'specaug_rate': 0.3,
+	'specaug_rate': 0.1,
 	'freq_mask': 27,
 	'time_mask': 70,
 	'sample_rate': 16000, 
