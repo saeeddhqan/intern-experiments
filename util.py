@@ -11,7 +11,11 @@ import torchaudio
 import matplotlib.pyplot as plt
 import math, os, pathlib, random, argparse, json, re
 import sentencepiece, datasets, tqdm, hashlib, urllib
+import tokenizer
 
+from torchmetrics.text import WordErrorRate, CharErrorRate
+calculate_wer = WordErrorRate()
+calculate_cer = CharErrorRate()
 
 
 class Config:
@@ -63,11 +67,13 @@ class Config:
 
 
 class TextProcess:
-	def __init__(self, tokenizer_model_path: str = '', digits_dataset: bool = True) -> NoReturn:
+	def __init__(self, tokenizer_model_path: str = '', tokenizer_type: bool = True) -> NoReturn:
 		self.sot = '<s>'
 		self.eot = '</s>'
 		self.pad = '<pad>'
-		if digits_dataset:
+		self.etc = ''
+		self.tokenizer_type = tokenizer_type
+		if tokenizer_type == 'digits':
 			chars = [self.sot, self.eot, self.pad]
 			self.chars = chars + sorted(list(set('0123456789')))
 			self.stoi = {x:i for i,x in enumerate(self.chars)}
@@ -77,10 +83,21 @@ class TextProcess:
 			self.sot_i = self.stoi[self.sot]
 			self.eot_i = self.stoi[self.eot]
 			self.vocab_size = len(self.chars)
-
 			self.sot_i = 0
 			self.eot_i = 1
 			self.pad_i = 2
+		elif tokenizer_type == 'whisper':
+			self.tokenizer = tokenizer.get_tokenizer(False, num_languages=99, language='en', task='transcribe')
+			self.encode = self.tokenizer.encode
+			self.decode = self.tokenizer.decode
+			self.vocab_size = self.tokenizer.encoding.n_vocab
+			self.sot_i = list(self.tokenizer.sot_sequence)
+			self.eot_i = self.tokenizer.eot
+			self.pad_i = self.tokenizer.no_speech
+			self.sot = '<|startoftranscript|>'
+			self.eot = '<|endoftext|>'
+			self.pad = '<|nospeech|>'
+			self.etc = '<|notimestamps|>'
 		else:
 			self.tokenizer = sentencepiece.SentencePieceProcessor(model_file=tokenizer_model_path)
 			self.encode = self.tokenizer.encode
@@ -90,8 +107,7 @@ class TextProcess:
 			self.eot_i = 2
 			self.pad_i = 3
 
-		self.clean = lambda s: s.replace(self.sot, '').replace(self.eot, '').replace(self.pad, '')
-
+		self.clean = lambda s: s.replace(self.sot, '').replace(self.eot, '').replace(self.pad, '').replace(self.etc, '')
 
 	def __len__(self) -> int:
 		return self.vocab_size
@@ -108,12 +124,14 @@ class TextProcess:
 		'''
 		text = text.replace('\n', '')
 		text = [x for x in self.encode(text)]
-
-		text.insert(self.sot_i, 0)
+		if self.tokenizer_type == 'whisper':
+			text = self.sot_i + text
+		else:
+			text.insert(self.sot_i, 0)
 
 		if len(text) < block_size:
+			text.extend([self.pad_i for _ in range((block_size - len(text)) - 1)])
 			text.append(self.eot_i)
-			text.extend([self.pad_i for _ in range(block_size - len(text))])
 			return text
 		elif len(text) >= block_size:
 			print(f'[{len(text)}]cutting...')
@@ -203,95 +221,6 @@ def get_logger(log_dir: str, name: str,
 	return CustomLogger(name)
 
 
-def wer(r: str, h: str) -> float:
-	'''
-		Calculate word error rate (WER).
-		Parameters
-		----------
-		r: str
-			The ground truth text transcript
-		h: str
-			The predicted text transcript
-		Returns
-		-------
-		float:
-			The word error rate
-	'''
-	# build the matrix
-	d = np.zeros((len(r) + 1) * (len(h) + 1), dtype=np.uint8)
-	d = d.reshape((len(r) + 1, len(h) + 1))
-	for i in range(len(r) + 1):
-		for j in range(len(h) + 1):
-			if i == 0:
-				d[0][j] = j
-			elif j == 0:
-				d[i][0] = i
-	
-	# computation
-	for i in range(1, len(r) + 1):
-		for j in range(1, len(h) + 1):
-			if r[i - 1] == h[j - 1]:
-				d[i][j] = d[i - 1][j - 1]
-			else:
-				substitution = d[i - 1][j - 1] + 1
-				insertion = d[i][j - 1] + 1
-				deletion = d[i - 1][j] + 1
-				d[i][j] = min(substitution, insertion, deletion)
-	
-	return float(d[len(r)][len(h)] / len(r))
-
-
-def accuracy(r: str, h: str) -> float:
-	'''
-		Calculate accuracy, the higher the better.
-		Parameters
-		----------
-		r: str
-			The ground truth text transcript
-		h: str
-			The predicted text transcript
-		Returns
-		-------
-		float:
-			The accuracy
-	'''
-	assert len(r) == len(h)
-	return float(sum([1 for x, y in zip(r, h) if x == y])) / len(r)
-
-
-def acc_wer_score(r: str, h: str) -> float:
-	'''
-		Calculate the overall performance, the higher the better.
-		Parameters
-		----------
-		r: str
-			The ground truth text transcript
-		h: str
-			The predicted text transcript
-	'''
-	return accuracy(r, h) * (1 - wer(r, h))
-
-
-def overall_accuracy(all_r: list, all_h: list) -> Tuple:
-	'''
-		metrics
-	'''
-	assert len(all_r) == len(all_h), f"Lengths of r and h should be the same. Got {len(all_r)} and {len(all_h)}"
-	score_acc = 0
-	score_acc_wer = 0
-	score_wer = 0
-	for r, h in zip(all_r, all_h):
-		score_acc += accuracy(r, h)
-		score_acc_wer += acc_wer_score(r, h)
-		score_wer += wer(r, h)
-	score_acc = score_acc / len(all_r)
-	score_acc_wer = score_acc_wer / len(all_r)
-	score_wer_raw = score_wer / len(all_r)
-	score_wer = (1 - score_wer_raw) # Now, the higher the better
-	one_score_for_all = (score_acc + score_acc_wer + score_wer) / 3
-	return score_acc, score_acc_wer, score_wer, one_score_for_all, score_wer_raw
-
-
 def plot_metrics(metrics_list: Dict, train_id: str) -> Tuple:
 	"""
 		Plot train and test loss, word error rate, and accuracy.
@@ -305,40 +234,32 @@ def plot_metrics(metrics_list: Dict, train_id: str) -> Tuple:
 	"""
 
 	key_plot = 'micro' if config.epoch < 50 and len(metrics_list['micro']) > 0 else 'main'
-	order = ('main', 'micro') if key_plot == 'micro' else ('micro', 'main')
-	best_metrics = None
-	min_wer = float('inf')
-	content = []
+	best_metrics = (-1, -1, -1, key_plot)
+	if metrics_list['main'] == [] and metrics_list['micro'] == []:
+		return best_metrics
+	wer = [t[4] for t in metrics_list['main']] + [t[4] for t in metrics_list['micro']]
+	min_wer = min(wer)
 
-	for key in order:
-		epochs = [t[0] for t in metrics_list[key]]
-		steps = [t[1] for t in metrics_list[key]]
-		train_losses = [t[2].item() for t in metrics_list[key]]
-		test_losses = [t[3].item() for t in metrics_list[key]]
-		wer = [t[4] for t in metrics_list[key]]
-		accuracy = [t[5] for t in metrics_list[key]]
+	train_losses = {'main': [], 'micro': []}
+	test_losses = {'main': [], 'micro': []}
+	wers = {'main': [], 'micro': []}
+	for key in ('main', 'micro'):
+		for t in metrics_list[key]:
+			if t[4] == min_wer:
+				best_metrics = (min_wer, t[2].item(), t[3].item(), key)
+			train_losses[key].append(t[2].item())
+			test_losses[key].append(t[3].item())
+			wers[key].append(t[4])
 
-		content.append({
-			f"train_losses_{key}": train_losses,
-			f"test_losses_{key}": test_losses,
-			f"wer_{key}": wer,
-			f"accuracy_{key}": accuracy,
-		})
-		if wer == []:
-			continue
-		if min(wer) < min_wer:
-			min_wer = min(wer)
-			min_index = wer.index(min_wer)
-			best_metrics = (accuracy[min_index], min_wer, train_losses[min_index], test_losses[min_index], key_plot)
-	print(content)
-	json.dump(content, open(f"logs/{train_id}.json", 'w'))
+
+	json.dump([train_losses, test_losses, wers], open(f"logs/{train_id}.json", 'w'))
 
 	config.logger.info(f"Using {key_plot} for plots")
 
-	combined_epochs = np.array(epochs) + np.array(steps) / max(steps) if key_plot == 'micro' else epochs
+	combined_steps = np.arange(len(train_losses[key_plot]))
 
-	plt.plot(combined_epochs, train_losses, label='Train Loss')
-	plt.plot(combined_epochs, test_losses, label='Test Loss')
+	plt.plot(combined_steps, train_losses[key_plot], label='Train Loss')
+	plt.plot(combined_steps, test_losses[key_plot], label='Test Loss')
 	plt.title('Loss')
 	plt.xlabel('Epoch')
 	plt.ylabel('Loss')
@@ -347,32 +268,29 @@ def plot_metrics(metrics_list: Dict, train_id: str) -> Tuple:
 	plt.savefig(f"logs/{train_id}_loss.png")
 	plt.clf()
 
-	plt.plot(combined_epochs, wer)
+	plt.plot(combined_steps, wers[key_plot])
 	plt.title('Word Error Rate')
 	plt.xlabel('Epoch')
 	plt.ylabel('WER')
 	plt.savefig(f"logs/{train_id}_wer.png")
 	plt.clf()
 
-	plt.plot(combined_epochs, accuracy)
-	plt.title('Accuracy')
-	plt.xlabel('Epoch')
-	plt.ylabel('Accuracy')
-	plt.savefig(f"logs/{train_id}_accuracy.png")
-	plt.clf()
-
 	return best_metrics
 
 
 def set_dataset_specifiers() -> NoReturn:
-	if config.dataset_name != 'digits':
-		text_process = TextProcess(tokenizer_model_path='assets/boolq/boolq-tok-8k.model', digits_dataset=False)
+	if config.dataset_name == 'digits':
+		text_process = TextProcess(tokenizer_model_path='assets/boolq/boolq-tok-8k.model', tokenizer_type='digits')
+		CHUNK_LENGTH = 7
+		seqlen = 7
+	elif config.dataset_name == 'boolq':
+		text_process = TextProcess(tokenizer_model_path='assets/boolq/boolq-tok-8k.model', tokenizer_type='sp')
 		CHUNK_LENGTH = 30
 		seqlen = 32
 	else:
-		text_process = TextProcess(digits_dataset=True)
-		CHUNK_LENGTH = 7
-		seqlen = 7
+		text_process = TextProcess(tokenizer_type='whisper')
+		CHUNK_LENGTH = 30
+		seqlen = 128
 
 	SAMPLE_RATE = 16000
 	N_SAMPLES = CHUNK_LENGTH * SAMPLE_RATE
@@ -453,7 +371,7 @@ params = {
 	'model_path': '',
 	'train_id': '',
 	'dataset_name': 'digits',
-	'one_shot': False,
+	'nar': False, # non auto regressive
 	'fine_tune': False,
 	'no_footprint': False,
 	'freeze_encoder': False,
@@ -772,17 +690,18 @@ def prepare_text(
 
 
 class DataDigits(torch.utils.data.Dataset):
-
-	def __init__(self, dir_path: Tensor, device: Union[str, torch.device]) -> NoReturn:
+	def __init__(self, mode: Tensor, device: Union[str, torch.device]) -> NoReturn:
 		self.device = device
 		self.text_process = config.text_process
 		self.data = []
-		self.mode = dir_path.split('/')[-1]
+		self.mode = mode
 
 		self.augmentator = None
-		if self.mode == 'train_data':
+		if self.mode == 'train':
 			self.augmentator = Augmentator()
-
+			dir_path = config.train_path
+		else:
+			dir_path = config.test_path
 		file_list = os.listdir(dir_path)
 		for filename in file_list:
 			_, extension = os.path.splitext(filename)
@@ -808,11 +727,10 @@ class DataDigits(torch.utils.data.Dataset):
 		mel_segment = prepare_audio(file_path, self.device, self.augmentator)
 		text = open(self.data[idx]['text']).read()
 		sequence, labels = prepare_text(text, self.device)
-		return mel_segment, sequence, labels
+		return mel_segment.to(config.dtype), sequence, labels
 
 
 class DataBoolq(torch.utils.data.Dataset):
-
 	def __init__(self, mode: str, device: Union[str, torch.device]) -> NoReturn:
 		self.device = device
 		self.text_process = config.text_process
@@ -822,7 +740,7 @@ class DataBoolq(torch.utils.data.Dataset):
 
 
 		self.augmentator = None
-		if self.mode == 'train_data':
+		if self.mode == 'train':
 			self.augmentator = Augmentator()
 			self.data = ds['train']
 		else:
@@ -848,4 +766,44 @@ class DataBoolq(torch.utils.data.Dataset):
 		text = self.normalizer(self.data[idx]['question'])
 		mel_segment = prepare_audio(np.float32(self.data[idx]['audio']['array']), self.device, self.augmentator)
 		sequence, labels = prepare_text(text, self.device)
-		return mel_segment, sequence, labels
+		return mel_segment.to(config.dtype), sequence, labels
+
+
+class DataLibSpeech10h(torch.utils.data.Dataset):
+
+	def __init__(self, mode: str, device: Union[str, torch.device]) -> NoReturn:
+		self.device = device
+		self.text_process = config.text_process
+		self.data = []
+		self.mode = mode
+		ds = datasets.load_dataset('ahazeemi/librispeech10h')
+
+		self.augmentator = None
+		if self.mode == 'train':
+			self.augmentator = Augmentator()
+			self.data = datasets.concatenate_datasets([ds['train.10'], ds['validation']])
+		else:
+			self.data = ds['test']
+		self.data = self.data.remove_columns('speaker_id')
+		self.data = self.data.remove_columns('chapter_id')
+		self.data = self.data.remove_columns('id')
+		self.data = self.data.remove_columns('file')
+
+
+	def normalizer(self, txt: str) -> str:
+		txt = re.sub(r'[\?,\.\:/\]\[\{\}\=\+\(\)\!\$\%\&\*\'\"]+', '', txt)
+		return txt.lower()
+
+
+	def __len__(self) -> int:
+		return len(self.data)
+
+
+	def __getitem__(self, idx: int) -> Tuple[Tensor, Tensor, Tensor]:
+		if torch.is_tensor(idx):
+			idx = idx.item()
+
+		text = self.normalizer(self.data[idx]['text'])
+		mel_segment = prepare_audio(np.float32(self.data[idx]['audio']['array']), self.device, self.augmentator)
+		sequence, labels = prepare_text(text, self.device)
+		return mel_segment.to(config.dtype), sequence, labels

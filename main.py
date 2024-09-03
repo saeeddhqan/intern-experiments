@@ -41,15 +41,23 @@ class Manager:
 		self.model = model
 		self.model.to(config.device)
 		self.mode = mode
-		datawrapper = util.DataBoolq if config.dataset_name == 'boolq' else util.DataDigits
+		match config.dataset_name:
+			case 'boolq':
+				datawrapper = util.DataBoolq
+			case 'librispeech10h':
+				datawrapper = util.DataLibSpeech10h
+			case 'digits':
+				datawrapper = util.DataDigits
+			case _:
+				raise NotImplementedError('provide a supported dataset name')
 
 		self.dataset_train = DataLoader(
-			dataset=datawrapper(config.train_path, config.device),
+			dataset=datawrapper('train', config.device),
 			batch_size=config.batch_size,
 			shuffle=True,
 		)
 		self.dataset_test = DataLoader(
-			dataset=datawrapper(config.test_path, config.device),
+			dataset=datawrapper('test', config.device),
 			batch_size=config.batch_size,
 			shuffle=False,
 		)
@@ -87,14 +95,14 @@ class Manager:
 			os.makedirs('results', exist_ok=True)
 			if not os.path.exists('results/results.csv'):
 				with open('results/results.csv', 'w') as fp:
-					fp.write('time,train_id,accuracy,wer,train_loss,test_loss,nlayers,nheads,dim,batch_size,causal_mode,one_shot,mtps,test_ratio,freeze_encoder,freeze_decoder\n')
+					fp.write('time,train_id,wer,train_loss,test_loss,nlayers,nheads,dim,batch_size,causal_mode,nar,mtps,test_ratio,freeze_encoder,freeze_decoder,dataset,rtf\n')
 
 			var = config.variation.replace(' ', '_').lower()
 			var += '__' + config.causal_mode
 			var += f"__{config.dim}dim__{config.nlayers}nlayers__{config.batch_size}batch__{config.epoch}epochs"
 			var += f"__{config.specaug_rate}sa__{config.accumulation_steps}as"
 			var += f"__{config.nheads}nh"
-			var += f"__{config.one_shot}_os"
+			var += f"__{config.nar}_nar"
 			var += f"__{config.freeze_encoder}_fencoder"
 			var += f"__{config.freeze_decoder}_fdecoder"
 
@@ -141,7 +149,7 @@ class Manager:
 		if os.path.exists(self.checkpoints_path):
 			with open(self.checkpoints_path) as f:
 				tmp = json.load(f)
-				if 'checkpoints' in tmp and 'best_model' in tmp:
+				if 'checkpoints' in tmp:
 					if (isinstance(tmp['checkpoints'], dict)):
 						self.checkpoints = tmp
 					else:
@@ -209,10 +217,19 @@ class Manager:
 		if path in ('tiny.en', 'small', 'small.en'):
 			path = util.download_whisper(util.whisper_models[path], 'whisper_models')
 			checkpoint = torch.load(path)['model_state_dict']
-			# loading encoder weights
-			self.model.encoder.load_state_dict({x.replace('encoder.', ''):checkpoint[x] for x in checkpoint if x.startswith('encoder')})
-			# and decoder weights
-			self.model.decoder.load_state_dict({x.replace('decoder.', ''):checkpoint[x] for x in checkpoint if x.startswith('decoder')})
+			# loading weights
+			encoder = {}
+			decoder = {}
+			for x in checkpoint:
+				if x.startswith('encoder'):
+					encoder[x.replace('encoder.', '')] = checkpoint[x]
+				elif x.startswith('decoder'):
+					if 'positional_embedding' in x:
+						decoder[x.replace('decoder.', '')] = checkpoint[x][:config.n_text_ctx]
+					else:
+						decoder[x.replace('decoder.', '')] = checkpoint[x]
+			self.model.encoder.load_state_dict(encoder)
+			self.model.decoder.load_state_dict(decoder)
 			return
 		try:
 			checkpoint = torch.load(path)
@@ -259,12 +276,16 @@ class Manager:
 			if config.no_footprint:
 				return
 			self.save_checkpoints()
-			epoch, acc, wer, train_loss, test_loss, key = util.plot_metrics(self.metrics, self.train_id)
+			wer, train_loss, test_loss, key = util.plot_metrics(self.metrics, self.train_id)
+			if wer == -1: # no data
+				return
 			with open('results/results.csv', 'a') as fp:
 				mtps = sum(self.metrics['time_per_sample']) / len(self.metrics['time_per_sample'])
-				test_ratio = self.metrics[key][0][6]
+				rtf = mtps / config.chunk_length
+				test_ratio = self.metrics[key][0][5]
 				config.logger.info(f"Average time per sample: {mtps}")
-				fp.write(f"{get_timestamp()},{self.train_id},{acc},{wer},{train_loss},{test_loss},{config.nlayers},{config.nheads},{config.dim},{config.batch_size},{config.causal_mode},{config.one_shot},{mtps},{test_ratio},{config.freeze_encoder},{config.freeze_decoder}\n")
+				config.logger.info(f"Real Time Factor: {rtf}")
+				fp.write(f"{get_timestamp()},{self.train_id},{wer},{train_loss},{test_loss},{config.nlayers},{config.nheads},{config.dim},{config.batch_size},{config.causal_mode},{config.nar},{mtps},{test_ratio},{config.freeze_encoder},{config.freeze_decoder},{config.dataset_name},{rtf}\n")
 
 
 	@torch.no_grad()
@@ -323,7 +344,7 @@ class Manager:
 		self.metrics[mode].append((
 			epoch, step,
 			loss['train'], loss['test'],
-			res['wer'], res['accuracy'],
+			res['wer'],
 			res['test_ratio'],
 		))
 		self.metrics['time_per_sample'].append(res['time_per_sample'])
@@ -399,16 +420,16 @@ class Manager:
 		test_ratio = n_samples / len(self.dataset_test)
 		results = {}
 		all_wer = []
-		all_acc = []
 		total_time = 0
-		print_steps = 4
+		print_steps = 6
 		took_tests = 0
 		for step, chunk in enumerate(self.dataset_test):
 			mel, sequence, labels = chunk
 			start = time.perf_counter()
-			_, seqx = self.model.inference(
+			seqx = self.model.inference(
 				mel,
 				config.n_text_ctx,
+				config.text_process.eot_i,
 			)
 			end = time.perf_counter()
 			total_time += end - start
@@ -416,12 +437,9 @@ class Manager:
 			seqx = seqx.cpu().tolist()
 			labels = labels.cpu().tolist()
 
-			with ThreadPoolExecutor(max_workers=16) as executor:
-				futures = [executor.submit(self.decode_single_item, seqx[i], labels[i]) for i in range(mel.size(0))]
-				for future in futures:
-					wer, accuracy, groundtruth, text = future.result()
-					all_wer.append(wer)
-					all_acc.append(accuracy)
+			for i in range(mel.size(0)):
+				wer, groundtruth, text = self.decode_single_item(seqx[i], labels[i])
+				all_wer.append(wer)
 
 			if step < print_steps:
 				config.logger.info(f"real: {groundtruth}")
@@ -433,9 +451,7 @@ class Manager:
 		time_per_batch = total_time / took_tests
 		time_per_sample = time_per_batch / mel.size(0)
 		wer = sum(all_wer) / len(all_wer)
-		acc = sum(all_acc) / len(all_acc)
 		results['total_time'] = total_time
-		results['accuracy'] = acc
 		results['wer'] = wer
 		results['time_per_batch'] = time_per_sample
 		results['time_per_sample'] = time_per_sample
@@ -443,7 +459,6 @@ class Manager:
 		results['test_ratio'] = test_ratio
 
 		config.logger.info(f"\t\twer({mode}): {round(wer, 4)}")
-		config.logger.info(f"\t\taccuracy({mode}): {round(acc, 4)}")
 		config.logger.info(f"\t\ttotal time({mode}): {round(total_time, 4)}")
 		config.logger.info(f"\t\ttime per sample({mode}): {round(time_per_sample, 8)}")
 		config.logger.info(f"\t\ttest ratio({mode}): {round(test_ratio, 4)}")
@@ -451,7 +466,6 @@ class Manager:
 		if config.wandb and self.mode == 'train':
 			wandb.log({
 				f"test_{mode}/wer": wer,
-				f"test_{mode}/accuracy": accuracy,
 			})
 
 		return results
@@ -460,14 +474,11 @@ class Manager:
 	def decode_single_item(self, seq: Tensor, labels: Tensor) -> Tuple:
 		text = config.text_process.decoder(seq, remove_special_chars=True)
 		groundtruth = config.text_process.decoder(labels, remove_special_chars=True)
-		diff = len(groundtruth) - len(text)
-		if diff > 0:
-			text += '~' * diff
-		elif diff < 0:
-			text = text[:len(groundtruth)]
-		wer = util.wer(groundtruth, text)
-		accuracy = util.accuracy(groundtruth, text)
-		return wer, accuracy, groundtruth, text
+		if config.dataset_name == 'digits':
+			acc = util.calculate_cer(text, groundtruth)
+		else:
+			acc = util.calculate_wer(text, groundtruth)
+		return acc.item(), groundtruth, text
 
 
 	@torch.no_grad()
@@ -479,16 +490,16 @@ class Manager:
 
 			while True:
 				voice_path = input('Voice path: ')
-				mel = util.prepare_audio(voice_path, 'cuda').unsqueeze(0)
-				for method in ('multinomial', 'top-k', 'greedy'):
-					print('Using ', method)
-					_, seqx = self.model.inference(
-						mel,
-						config.block_size,
-						method
-					)
-					text = config.text_process.decoder(seqx[0].tolist(), True)
-					print('\t', text)
+				mel = util.prepare_audio(voice_path, 'cuda').unsqueeze(0).to(config.dtype)
+				print('Using "greedy" for sampling')
+				preds = self.model.inference(
+					mel,
+					config.n_text_ctx,
+					config.text_process.eot_i,
+					batch_process=False,
+				)
+				text = config.text_process.decoder(preds[0].tolist(), remove_special_chars=True)
+				print('\t', text)
 
 
 if __name__ == '__main__':
@@ -505,9 +516,9 @@ if __name__ == '__main__':
 	parser.add_argument('--wandb', action='store_true', default=config.wandb, help='use wandb')
 	parser.add_argument('--save_checkpoints', action='store_true', default=config.save_checkpoints, help='save checkpoints')
 	parser.add_argument('--model_path', type=str, default=config.model_path, help='which model do you want to test')
-	parser.add_argument('--dataset_name', type=str, default=config.dataset_name, help="which dataset do you want to train/test('digits', 'boolq')")
+	parser.add_argument('--dataset_name', type=str, default=config.dataset_name, help="which dataset do you want to train/test('librispeech10h', 'boolq', 'digits')")
 	parser.add_argument('--accumulation_steps', '-as', type=int, default=config.accumulation_steps, help='accumulation steps')
-	parser.add_argument('--one_shot', action='store_true', default=config.one_shot, help='use one shot method')
+	parser.add_argument('--nar', action='store_true', default=config.nar, help='use non auto regressive method')
 	parser.add_argument('--fine_tune', action='store_true', default=config.fine_tune, help='for fine tune')
 	parser.add_argument('--no_footprint', action='store_true', default=config.no_footprint, help='for fine tune')
 	parser.add_argument('--freeze_encoder', action='store_true', default=config.freeze_encoder, help='freezing encoder during fine tuning')
@@ -529,6 +540,9 @@ if __name__ == '__main__':
 
 	if config.action in ('test', 'live'):
 		config.no_footprint = True
+		if config.model_path in ('', None):
+			print('provide a model with --model_path')
+			exit()
 
 	whisper = model.Whisper(config)
 	manager = Manager(whisper, mode=args.action)

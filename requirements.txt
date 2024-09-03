@@ -17,3 +17,4 @@ timm
 causal-conv1d
 librosa
 matplotlib
+torchmetrics
