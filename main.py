@@ -276,6 +276,8 @@ class Manager:
 				return
 			self.save_checkpoints()
 			wer, train_loss, test_loss, key = util.plot_metrics(self.metrics, self.train_id)
+			if wer == -1:
+				return
 			with open('results/results.csv', 'a') as fp:
 				mtps = sum(self.metrics['time_per_sample']) / len(self.metrics['time_per_sample'])
 				rtf = mtps / config.chunk_length
@@ -378,7 +380,7 @@ class Manager:
 
 			epoch_loss += loss.detach()
 			print(step, end='\r')
-			if step % 300 == 299:
+			if step % 100 == 99:
 				self.test(epoch=epoch, step=step, mode='micro')
 			self.steps += 1
 

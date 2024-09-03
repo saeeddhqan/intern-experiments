@@ -250,7 +250,7 @@ def plot_metrics(metrics_list: Dict, train_id: str) -> Tuple:
 				best_metrics = (min_wer, t[2].item(), t[3].item(), key)
 			train_losses[key].append(t[2].item())
 			test_losses[key].append(t[3].item())
-			wers[key].append(t[4].item())
+			wers[key].append(t[4])
 
 
 	json.dump([train_losses, test_losses, wers], open(f"logs/{train_id}.json", 'w'))
@@ -331,7 +331,7 @@ params = {
 	'batch_size': 16,
 	'seqlen': None,
 	'n_vocab': None,
-	'specaug_rate': 0.1,
+	'specaug_rate': 0.0,
 	'freq_mask': 27,
 	'time_mask': 70,
 	'sample_rate': 16000, 
