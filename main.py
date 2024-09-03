@@ -105,6 +105,7 @@ class Manager:
 			var += f"__{config.nar}_nar"
 			var += f"__{config.freeze_encoder}_fencoder"
 			var += f"__{config.freeze_decoder}_fdecoder"
+			var += f"__{config.dataset_name}_ds"
 
 			self.var = var
 			if config.train_id == '':
@@ -451,6 +452,7 @@ class Manager:
 		time_per_batch = total_time / took_tests
 		time_per_sample = time_per_batch / mel.size(0)
 		wer = sum(all_wer) / len(all_wer)
+
 		results['total_time'] = total_time
 		results['wer'] = wer
 		results['time_per_batch'] = time_per_sample
