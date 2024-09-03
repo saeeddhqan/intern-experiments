@@ -46,18 +46,16 @@ class Manager:
 				datawrapper = util.DataBoolq
 			case 'librispeech10h':
 				datawrapper = util.DataLibSpeech10h
-			case 'digits':
-				datawrapper = util.DataDigits
 			case _:
 				raise NotImplementedError('provide a supported dataset name')
 
 		self.dataset_train = DataLoader(
-			dataset=datawrapper(config.train_path, config.device),
+			dataset=datawrapper('train', config.device),
 			batch_size=config.batch_size,
 			shuffle=True,
 		)
 		self.dataset_test = DataLoader(
-			dataset=datawrapper(config.test_path, config.device),
+			dataset=datawrapper('test', config.device),
 			batch_size=config.batch_size,
 			shuffle=False,
 		)
@@ -95,16 +93,17 @@ class Manager:
 			os.makedirs('results', exist_ok=True)
 			if not os.path.exists('results/results.csv'):
 				with open('results/results.csv', 'w') as fp:
-					fp.write('time,train_id,accuracy,wer,train_loss,test_loss,nlayers,nheads,dim,batch_size,causal_mode,one_shot,mtps,test_ratio,freeze_encoder,freeze_decoder\n')
+					fp.write('time,train_id,wer,train_loss,test_loss,nlayers,nheads,dim,batch_size,causal_mode,non_ar,mtps,test_ratio,freeze_encoder,freeze_decoder,dataset\n')
 
 			var = config.variation.replace(' ', '_').lower()
 			var += '__' + config.causal_mode
 			var += f"__{config.dim}dim__{config.nlayers}nlayers__{config.batch_size}batch__{config.epoch}epochs"
 			var += f"__{config.specaug_rate}sa__{config.accumulation_steps}as"
 			var += f"__{config.nheads}nh"
-			var += f"__{config.one_shot}_os"
+			var += f"__{config.non_ar}_nar"
 			var += f"__{config.freeze_encoder}_fencoder"
 			var += f"__{config.freeze_decoder}_fdecoder"
+			var += f"__{config.dataset_name}_ds"
 
 			self.var = var
 			if config.train_id == '':
@@ -113,7 +112,7 @@ class Manager:
 
 			if config.wandb:
 				self.wandb_init = wandb.init(
-					project='intern-experiments',
+					project='unified_token_decoder',
 					name=var,
 				)
 
@@ -276,12 +275,14 @@ class Manager:
 			if config.no_footprint:
 				return
 			self.save_checkpoints()
-			epoch, acc, wer, train_loss, test_loss, key = util.plot_metrics(self.metrics, self.train_id)
+			epoch, wer, train_loss, test_loss, key = util.plot_metrics(self.metrics, self.train_id)
 			with open('results/results.csv', 'a') as fp:
 				mtps = sum(self.metrics['time_per_sample']) / len(self.metrics['time_per_sample'])
-				test_ratio = self.metrics[key][0][6]
+				rtf = mtps / config.chunk_length
+				test_ratio = self.metrics[key][0][5]
 				config.logger.info(f"Average time per sample: {mtps}")
-				fp.write(f"{get_timestamp()},{self.train_id},{acc},{wer},{train_loss},{test_loss},{config.nlayers},{config.nheads},{config.dim},{config.batch_size},{config.causal_mode},{config.one_shot},{mtps},{test_ratio},{config.freeze_encoder},{config.freeze_decoder}\n")
+				config.logger.info(f"Real-Time-Factor: {rtf}")
+				fp.write(f"{get_timestamp()},{self.train_id},{wer},{train_loss},{test_loss},{config.nlayers},{config.nheads},{config.dim},{config.batch_size},{config.causal_mode},{config.non_ar},{mtps},{test_ratio},{config.freeze_encoder},{config.freeze_decoder}\n")
 
 
 	@torch.no_grad()
@@ -340,8 +341,7 @@ class Manager:
 		self.metrics[mode].append((
 			epoch, step,
 			loss['train'], loss['test'],
-			res['wer'], res['accuracy'],
-			res['test_ratio'],
+			res['wer'], res['test_ratio'],
 		))
 		self.metrics['time_per_sample'].append(res['time_per_sample'])
 
@@ -416,14 +416,13 @@ class Manager:
 		test_ratio = n_samples / len(self.dataset_test)
 		results = {}
 		all_wer = []
-		all_acc = []
 		total_time = 0
 		print_steps = 4
 		took_tests = 0
 		for step, chunk in enumerate(self.dataset_test):
 			mel, sequence, labels = chunk
 			start = time.perf_counter()
-			seqx = self.model.inference(
+			preds = self.model.inference(
 				mel,
 				config.n_text_ctx,
 				config.text_process.eot_i,
@@ -431,29 +430,26 @@ class Manager:
 			end = time.perf_counter()
 			total_time += end - start
 
-			seqx = seqx.cpu().tolist()
-			labels = labels.cpu().tolist()
-
-			with ThreadPoolExecutor(max_workers=16) as executor:
-				futures = [executor.submit(self.decode_single_item, seqx[i], labels[i]) for i in range(mel.size(0))]
-				for future in futures:
-					wer, accuracy, groundtruth, text = future.result()
-					all_wer.append(wer)
-					all_acc.append(accuracy)
-
+			preds = preds.tolist()
+			labels = labels.tolist()
+			preds_text = []
+			groundtruth_text = []
+			for b in range(mel.size(0)):
+				_, groundtruth, pred = self.decode_single_item(preds[b], labels[b])
+				preds_text.append(pred)
+				groundtruth_text.append(groundtruth)
+			all_wer.append(util.wer_calculate(preds_text, groundtruth_text).item())
 			if step < print_steps:
 				config.logger.info(f"real: {groundtruth}")
-				config.logger.info(f"got: {text}")
+				config.logger.info(f"got: {pred}")
 			took_tests += 1
 			if step == n_samples:
 				break
-
+			print(step, end='\r')
 		time_per_batch = total_time / took_tests
 		time_per_sample = time_per_batch / mel.size(0)
 		wer = sum(all_wer) / len(all_wer)
-		acc = sum(all_acc) / len(all_acc)
 		results['total_time'] = total_time
-		results['accuracy'] = acc
 		results['wer'] = wer
 		results['time_per_batch'] = time_per_sample
 		results['time_per_sample'] = time_per_sample
@@ -461,7 +457,6 @@ class Manager:
 		results['test_ratio'] = test_ratio
 
 		config.logger.info(f"\t\twer({mode}): {round(wer, 4)}")
-		config.logger.info(f"\t\taccuracy({mode}): {round(acc, 4)}")
 		config.logger.info(f"\t\ttotal time({mode}): {round(total_time, 4)}")
 		config.logger.info(f"\t\ttime per sample({mode}): {round(time_per_sample, 8)}")
 		config.logger.info(f"\t\ttest ratio({mode}): {round(test_ratio, 4)}")
@@ -469,23 +464,16 @@ class Manager:
 		if config.wandb and self.mode == 'train':
 			wandb.log({
 				f"test_{mode}/wer": wer,
-				f"test_{mode}/accuracy": accuracy,
 			})
 
 		return results
 
 
 	def decode_single_item(self, seq: Tensor, labels: Tensor) -> Tuple:
-		text = config.text_process.decoder(seq, remove_special_chars=True)
+		pred = config.text_process.decoder(seq, remove_special_chars=True)
 		groundtruth = config.text_process.decoder(labels, remove_special_chars=True)
-		diff = len(groundtruth) - len(text)
-		if diff > 0:
-			text += '~' * diff
-		elif diff < 0:
-			text = text[:len(groundtruth)]
-		wer = util.wer(groundtruth, text)
-		accuracy = util.accuracy(groundtruth, text)
-		return wer, accuracy, groundtruth, text
+		# wer = util.wer_calculate(pred, groundtruth)
+		return 0, groundtruth, pred
 
 
 	@torch.no_grad()
@@ -499,13 +487,13 @@ class Manager:
 				voice_path = input('Voice path: ')
 				mel = util.prepare_audio(voice_path, 'cuda').unsqueeze(0).to(config.dtype)
 				print('Using "greedy" for sampling')
-				seqx = self.model.inference(
+				preds = self.model.inference(
 					mel,
 					config.n_text_ctx,
 					config.text_process.eot_i,
 					batch_process=False,
 				)
-				text = config.text_process.decoder(seqx[0].tolist(), remove_special_chars=True)
+				text = config.text_process.decoder(preds[0].tolist(), remove_special_chars=True)
 				print('\t', text)
 
 
@@ -525,7 +513,7 @@ if __name__ == '__main__':
 	parser.add_argument('--model_path', type=str, default=config.model_path, help='which model do you want to test')
 	parser.add_argument('--dataset_name', type=str, default=config.dataset_name, help="which dataset do you want to train/test('digits', 'boolq')")
 	parser.add_argument('--accumulation_steps', '-as', type=int, default=config.accumulation_steps, help='accumulation steps')
-	parser.add_argument('--one_shot', action='store_true', default=config.one_shot, help='use one shot method')
+	parser.add_argument('--non_ar', action='store_true', default=config.non_ar, help='use non auto regressive method')
 	parser.add_argument('--fine_tune', action='store_true', default=config.fine_tune, help='for fine tune')
 	parser.add_argument('--no_footprint', action='store_true', default=config.no_footprint, help='for fine tune')
 	parser.add_argument('--freeze_encoder', action='store_true', default=config.freeze_encoder, help='freezing encoder during fine tuning')

@@ -13,6 +13,8 @@ import math, os, pathlib, random, argparse, json, re
 import sentencepiece, datasets, tqdm, hashlib, urllib
 import tokenizer
 
+from torchmetrics.text import WordErrorRate
+wer_calculate = WordErrorRate()
 
 class Config:
 	def __init__(self, data_dict: dict) -> NoReturn:
@@ -220,95 +222,6 @@ def get_logger(
 	return CustomLogger(name)
 
 
-def wer(r: str, h: str) -> float:
-	'''
-		Calculate word error rate (WER).
-		Parameters
-		----------
-		r: str
-			The ground truth text transcript
-		h: str
-			The predicted text transcript
-		Returns
-		-------
-		float:
-			The word error rate
-	'''
-	# build the matrix
-	d = np.zeros((len(r) + 1) * (len(h) + 1), dtype=np.uint8)
-	d = d.reshape((len(r) + 1, len(h) + 1))
-	for i in range(len(r) + 1):
-		for j in range(len(h) + 1):
-			if i == 0:
-				d[0][j] = j
-			elif j == 0:
-				d[i][0] = i
-	
-	# computation
-	for i in range(1, len(r) + 1):
-		for j in range(1, len(h) + 1):
-			if r[i - 1] == h[j - 1]:
-				d[i][j] = d[i - 1][j - 1]
-			else:
-				substitution = d[i - 1][j - 1] + 1
-				insertion = d[i][j - 1] + 1
-				deletion = d[i - 1][j] + 1
-				d[i][j] = min(substitution, insertion, deletion)
-	
-	return float(d[len(r)][len(h)] / len(r))
-
-
-def accuracy(r: str, h: str) -> float:
-	'''
-		Calculate accuracy, the higher the better.
-		Parameters
-		----------
-		r: str
-			The ground truth text transcript
-		h: str
-			The predicted text transcript
-		Returns
-		-------
-		float:
-			The accuracy
-	'''
-	assert len(r) == len(h)
-	return float(sum([1 for x, y in zip(r, h) if x == y])) / len(r)
-
-
-def acc_wer_score(r: str, h: str) -> float:
-	'''
-		Calculate the overall performance, the higher the better.
-		Parameters
-		----------
-		r: str
-			The ground truth text transcript
-		h: str
-			The predicted text transcript
-	'''
-	return accuracy(r, h) * (1 - wer(r, h))
-
-
-def overall_accuracy(all_r: list, all_h: list) -> Tuple:
-	'''
-		metrics
-	'''
-	assert len(all_r) == len(all_h), f"Lengths of r and h should be the same. Got {len(all_r)} and {len(all_h)}"
-	score_acc = 0
-	score_acc_wer = 0
-	score_wer = 0
-	for r, h in zip(all_r, all_h):
-		score_acc += accuracy(r, h)
-		score_acc_wer += acc_wer_score(r, h)
-		score_wer += wer(r, h)
-	score_acc = score_acc / len(all_r)
-	score_acc_wer = score_acc_wer / len(all_r)
-	score_wer_raw = score_wer / len(all_r)
-	score_wer = (1 - score_wer_raw) # Now, the higher the better
-	one_score_for_all = (score_acc + score_acc_wer + score_wer) / 3
-	return score_acc, score_acc_wer, score_wer, one_score_for_all, score_wer_raw
-
-
 def plot_metrics(metrics_list: Dict, train_id: str) -> Tuple:
 	"""
 		Plot train and test loss, word error rate, and accuracy.
@@ -323,7 +236,7 @@ def plot_metrics(metrics_list: Dict, train_id: str) -> Tuple:
 
 	key_plot = 'micro' if config.epoch < 50 and len(metrics_list['micro']) > 0 else 'main'
 	order = ('main', 'micro') if key_plot == 'micro' else ('micro', 'main')
-	best_metrics = None
+	best_metrics = (0,0,0,key_plot)
 	min_wer = float('inf')
 	content = []
 
@@ -333,20 +246,18 @@ def plot_metrics(metrics_list: Dict, train_id: str) -> Tuple:
 		train_losses = [t[2].item() for t in metrics_list[key]]
 		test_losses = [t[3].item() for t in metrics_list[key]]
 		wer = [t[4] for t in metrics_list[key]]
-		accuracy = [t[5] for t in metrics_list[key]]
 
 		content.append({
 			f"train_losses_{key}": train_losses,
 			f"test_losses_{key}": test_losses,
 			f"wer_{key}": wer,
-			f"accuracy_{key}": accuracy,
 		})
 		if wer == []:
 			continue
 		if min(wer) < min_wer:
 			min_wer = min(wer)
 			min_index = wer.index(min_wer)
-			best_metrics = (accuracy[min_index], min_wer, train_losses[min_index], test_losses[min_index], key_plot)
+			best_metrics = (min_wer, train_losses[min_index], test_losses[min_index], key_plot)
 	print(content)
 	json.dump(content, open(f"logs/{train_id}.json", 'w'))
 
@@ -371,23 +282,12 @@ def plot_metrics(metrics_list: Dict, train_id: str) -> Tuple:
 	plt.savefig(f"logs/{train_id}_wer.png")
 	plt.clf()
 
-	plt.plot(combined_epochs, accuracy)
-	plt.title('Accuracy')
-	plt.xlabel('Epoch')
-	plt.ylabel('Accuracy')
-	plt.savefig(f"logs/{train_id}_accuracy.png")
-	plt.clf()
-
 	return best_metrics
 
 
 def set_dataset_specifiers() -> NoReturn:
 	extra = 0
-	if config.dataset_name == 'digits':
-		text_process = TextProcess(tokenizer_type='digits')
-		CHUNK_LENGTH = 7
-		seqlen = 7
-	elif config.dataset_name == 'boolq':
+	if config.dataset_name == 'boolq':
 		text_process = TextProcess(tokenizer_model_path='assets/boolq/boolq-tok-8k.model', tokenizer_type='sp')
 		CHUNK_LENGTH = 30
 		seqlen = 32
@@ -475,7 +375,7 @@ params = {
 	'model_path': '',
 	'train_id': '',
 	'dataset_name': 'digits',
-	'one_shot': False,
+	'non_ar': False,
 	'fine_tune': False,
 	'no_footprint': False,
 	'freeze_encoder': False,
@@ -798,46 +698,6 @@ def prepare_text(
 	return sequence, labels
 
 
-class DataDigits(torch.utils.data.Dataset):
-
-	def __init__(self, dir_path: Tensor, device: Union[str, torch.device]) -> NoReturn:
-		self.device = device
-		self.text_process = config.text_process
-		self.data = []
-		self.mode = dir_path.split('/')[-1]
-
-		self.augmentator = None
-		if self.mode == 'train_data':
-			self.augmentator = Augmentator()
-
-		file_list = os.listdir(dir_path)
-		for filename in file_list:
-			_, extension = os.path.splitext(filename)
-			if extension == '.txt':
-				continue
-			file_path_voice = os.path.join(dir_path, filename)
-			file_path_text = os.path.join(dir_path, filename.replace(extension, '.txt'))
-			if not (os.path.isfile(file_path_voice) and os.path.isfile(file_path_voice)):  # Check if it's a file (not a subdirectory)
-				continue
-
-			self.data.append({'key': file_path_voice, 'text': file_path_text})
-
-
-	def __len__(self) -> int:
-		return len(self.data)
-
-
-	def __getitem__(self, idx: int) -> Tuple[Tensor, Tensor, Tensor]:
-		if torch.is_tensor(idx):
-			idx = idx.item()
-
-		file_path = self.data[idx]['key']
-		mel_segment = prepare_audio(file_path, self.device, self.augmentator)
-		text = open(self.data[idx]['text']).read()
-		sequence, labels = prepare_text(text, self.device)
-		return mel_segment.to(config.dtype), sequence, labels
-
-
 class DataBoolq(torch.utils.data.Dataset):
 
 	def __init__(self, mode: str, device: Union[str, torch.device]) -> NoReturn:
@@ -849,7 +709,7 @@ class DataBoolq(torch.utils.data.Dataset):
 
 
 		self.augmentator = None
-		if self.mode == 'train_data':
+		if self.mode == 'train':
 			self.augmentator = Augmentator()
 			self.data = ds['train']
 		else:
@@ -888,7 +748,7 @@ class DataLibSpeech10h(torch.utils.data.Dataset):
 		ds = datasets.load_dataset('ahazeemi/librispeech10h')
 
 		self.augmentator = None
-		if self.mode == 'train_data':
+		if self.mode == 'train':
 			self.augmentator = Augmentator()
 			self.data = datasets.concatenate_datasets([ds['train.10'], ds['validation']])
 		else:

@@ -214,10 +214,10 @@ class AudioEncoder(nn.Module):
 class TextDecoder(nn.Module):
 	def __init__(
 		self, n_vocab: int, n_ctx: int, n_state: int,
-		n_head: int, n_layers: int, one_shot: bool
+		n_head: int, n_layers: int, non_ar: bool
 	) -> NoReturn:
 		super().__init__()
-		self.one_shot = one_shot
+		self.non_ar = non_ar
 		self.token_embedding = nn.Embedding(n_vocab, n_state)
 		self.positional_embedding = nn.Parameter(torch.empty(n_ctx, n_state)) # warn
 		self.n_layers = n_layers
@@ -239,10 +239,10 @@ class TextDecoder(nn.Module):
 		self.register_buffer('mask', mask, persistent=False)
 
 
-	def forward(self, x: Tensor, xa: Tensor) -> Tensor:
+	def forward(self, x: Tensor, xa: Tensor, non_ar_test: bool = False) -> Tensor:
 		B, T = x.shape
 
-		if self.one_shot:
+		if self.non_ar and non_ar_test is False:
 			x = torch.zeros_like(x).to(torch.int).to(x.device)
 
 		x = self.token_embedding(x) + self.positional_embedding[:T].view(1, T, -1)
@@ -280,7 +280,7 @@ class Whisper(nn.Module):
 			params.dim,
 			params.nheads,
 			params.nlayers,
-			params.one_shot,
+			params.non_ar,
 		)
 		self.apply(self._init_weights)
 		print("number of parameters: %.2fM" % (self.num_params() / 1e6,))
@@ -322,12 +322,15 @@ class Whisper(nn.Module):
 		audio_features = self.embed_audio(audio_features)
 		sampling_method = 'greedy'
 		B = audio_features.size(0)
-		if self.params.one_shot:
-			seq = torch.zeros(B, self.params.seq_len).to(self.params.device)
-			logits = self.decoder(seq, audio_features)
-			probs = F.softmax(logits, dim=-1)
-			preds = torch.multinomial(probs.view(-1, probs.size(-1)), num_samples=1).view(-1)
-			return logits, preds.view(B, -1)
+		if self.params.non_ar:
+			seq = torch.zeros(B, self.params.seq_len, dtype=torch.int, device=self.params.device)
+			logits = self.decoder(seq, audio_features, non_ar_test=True)
+			if sampling_method == 'greedy':
+				preds = torch.argmax(logits, dim=-1)
+			elif sampling_method == 'multinomial':
+				probs = F.softmax(logits, dim=-1)
+				preds = torch.multinomial(probs.view(-1, probs.size(-1)), num_samples=1).view(-1)
+			return preds.view(B, -1)
 			
 		tokens = [self.params.text_process.sot_i]
 		seq = torch.tensor(tokens).flatten().view(1, -1).expand(B, -1).to(self.params.device)
@@ -364,7 +367,7 @@ class Whisper(nn.Module):
 		else:
 			loss = F.cross_entropy(
 				logits.view(-1, self.vocab_size),
-				targets.flatten() if not self.params.one_shot else tokens.flatten(),
+				targets.flatten() if not self.params.non_ar else tokens.flatten(),
 			)
 
 		return logits, loss
