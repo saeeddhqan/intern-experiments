@@ -61,13 +61,14 @@ class Manager:
 			batch_size=config.batch_size,
 			shuffle=False,
 		)
-
 		self.checkpoints = {}
 		self.checkpoints_path = None
 		self.model_path_format = None
 		self.metrics = {'main': [], 'micro': [], 'time_per_sample': []} # main is for getting metrics after each epoch, micro happens during epochs
 		self.steps = 0
 		self.init_config()
+		config.logger.info(f"Dataset train len: {len(self.dataset_train)}")
+		config.logger.info(f"Dataset test len: {len(self.dataset_test)}")
 
 
 	def get_lr(self, step: int = 10, warmup_steps: int = 10) -> float:
@@ -446,6 +447,7 @@ class Manager:
 				config.logger.info(f"real: {groundtruth}")
 				config.logger.info(f"got: {text}")
 			took_tests += 1
+			print(step, end='\r')
 			if step == n_samples:
 				break
 
@@ -455,7 +457,7 @@ class Manager:
 
 		results['total_time'] = total_time
 		results['wer'] = wer
-		results['time_per_batch'] = time_per_sample
+		results['time_per_batch'] = time_per_batch
 		results['time_per_sample'] = time_per_sample
 		results['n_samples'] = n_samples
 		results['test_ratio'] = test_ratio
@@ -474,7 +476,12 @@ class Manager:
 
 
 	def decode_single_item(self, seq: Tensor, labels: Tensor) -> Tuple:
-		text = config.text_process.decoder(seq, remove_special_chars=True)
+		if config.text_process.eot_i in seq: # slice seq up to the eot.
+			seq = seq[:seq.index(config.text_process.eot_i)]
+		if config.text_process.eot_i in labels:
+			labels = labels[:labels.index(config.text_process.eot_i)]
+
+		text = util.normalizer(config.text_process.decoder(seq, remove_special_chars=True))
 		groundtruth = config.text_process.decoder(labels, remove_special_chars=True)
 		if config.dataset_name == 'digits':
 			acc = util.calculate_cer(text, groundtruth)

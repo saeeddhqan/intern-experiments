@@ -333,7 +333,7 @@ params = {
 	'batch_size': 16,
 	'seqlen': None,
 	'n_vocab': None,
-	'specaug_rate': 0.3,
+	'specaug_rate': 0.0,
 	'freq_mask': 27,
 	'time_mask': 70,
 	'sample_rate': 16000, 
@@ -639,8 +639,8 @@ def log_mel_spectrogram(
 	if isinstance(audio, np.ndarray):
 		audio = torch.from_numpy(audio)
 
-	if augmentator is not None:
-		audio = augmentator(audio.view(1, -1), before_or_after='before').view(-1)
+	# if augmentator is not None:
+		# audio = augmentator(audio.view(1, -1), before_or_after='before').view(-1)
 
 	if device is not None:
 		audio = audio.to(device)
@@ -670,10 +670,15 @@ def prepare_audio(
 	mel = log_mel_spectrogram(audio, padding=config.n_samples, device=device, augmentator=augmentator)
 	mel = pad_or_trim(mel, config.n_frames)
 
-	# if augmentator:
-	# 	mel = apply_spec_augment(mel)
+	if augmentator:
+		mel = apply_spec_augment(mel)
 
 	return mel
+
+
+def normalizer(txt: str) -> str:
+	txt = re.sub(r'[\?,\.\:/\]\[\{\}\=\+\(\)\!\$\%\&\*\'\"]+', '', txt)
+	return txt.lower()
 
 
 def prepare_text(
@@ -750,11 +755,6 @@ class DataBoolq(torch.utils.data.Dataset):
 		self.data = self.data.remove_columns('explanation')
 
 
-	def normalizer(self, txt: str) -> str:
-		txt = re.sub(r'[\?,\.\:/\]\[\{\}\=\+\(\)\!\$\%\&\*\'\"]+', '', txt)
-		return txt.lower()
-
-
 	def __len__(self) -> int:
 		return len(self.data)
 
@@ -763,7 +763,7 @@ class DataBoolq(torch.utils.data.Dataset):
 		if torch.is_tensor(idx):
 			idx = idx.item()
 
-		text = self.normalizer(self.data[idx]['question'])
+		text = normalizer(self.data[idx]['question'])
 		mel_segment = prepare_audio(np.float32(self.data[idx]['audio']['array']), self.device, self.augmentator)
 		sequence, labels = prepare_text(text, self.device)
 		return mel_segment.to(config.dtype), sequence, labels
@@ -790,11 +790,6 @@ class DataLibSpeech10h(torch.utils.data.Dataset):
 		self.data = self.data.remove_columns('file')
 
 
-	def normalizer(self, txt: str) -> str:
-		txt = re.sub(r'[\?,\.\:/\]\[\{\}\=\+\(\)\!\$\%\&\*\'\"]+', '', txt)
-		return txt.lower()
-
-
 	def __len__(self) -> int:
 		return len(self.data)
 
@@ -803,7 +798,7 @@ class DataLibSpeech10h(torch.utils.data.Dataset):
 		if torch.is_tensor(idx):
 			idx = idx.item()
 
-		text = self.normalizer(self.data[idx]['text'])
+		text = normalizer(self.data[idx]['text'])
 		mel_segment = prepare_audio(np.float32(self.data[idx]['audio']['array']), self.device, self.augmentator)
 		sequence, labels = prepare_text(text, self.device)
 		return mel_segment.to(config.dtype), sequence, labels
