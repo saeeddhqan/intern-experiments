@@ -24,10 +24,11 @@ def set_seed(seed: int):
 	torch.manual_seed(seed)
 	torch.cuda.manual_seed(seed)
 	torch.cuda.manual_seed_all(seed)
-wandb.require('core')
 set_seed(1244)
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
+wandb.require('core')
+
 
 def get_timestamp():
 	now = datetime.now()
@@ -64,11 +65,35 @@ class Manager:
 		self.checkpoints = {}
 		self.checkpoints_path = None
 		self.model_path_format = None
-		self.metrics = {'main': [], 'micro': [], 'time_per_sample': []} # main is for getting metrics after each epoch, micro happens during epochs
+		self.metrics = {'instances': [], 'time_per_sample': []}
 		self.steps = 0
 		self.init_config()
 		config.logger.info(f"Dataset train len: {len(self.dataset_train)}")
 		config.logger.info(f"Dataset test len: {len(self.dataset_test)}")
+
+	def weighted_average_model_weights(
+		self,
+		checkpoint_dict: Dict,
+		n: int = 5,
+		alpha: float = 1.0,
+	) -> Dict:
+		sorted_checkpoints = sorted(checkpoint_dict.items(), key=lambda x: x[1]['wer'])[:n]
+
+		losses = [checkpoint[1]['wer'] for checkpoint in sorted_checkpoints]
+		paths = [checkpoint[1]['path'] for checkpoint in sorted_checkpoints]
+
+		test_losses_neg = torch.tensor([loss for loss in losses])
+		test_losses_neg = -(test_losses_neg / test_losses_neg.max())
+		softmax_weights = F.softmax(torch.tensor(test_losses_neg) * alpha, dim=0) # Softmax of negative losses
+
+		averaged_weights = None
+		for i, path in enumerate(paths):
+			model_weights = torch.load(path)['model']
+			if averaged_weights is None:
+				averaged_weights = {key: torch.zeros_like(val) for key, val in model_weights.items()}
+			for key in averaged_weights:
+				averaged_weights[key] += softmax_weights[i] * model_weights[key]
+		return averaged_weights
 
 
 	def get_lr(self, step: int = 10, warmup_steps: int = 10) -> float:
@@ -84,7 +109,7 @@ class Manager:
 
 
 		self.optimizer = torch.optim.Adam(self.model.parameters(),
-			lr=1e-7, betas=(0.9, 0.98), fused=True)
+			lr=1e-4, betas=(0.9, 0.98), fused=True)
 
 		if self.mode == 'train':
 			made_checkpoints_dir = False
@@ -145,17 +170,13 @@ class Manager:
 		'''
 			Load checkpoints object.
 		'''
-
 		self.checkpoints_path = self.model_path_format + '.json'
 		reload_checkpoints = False
 		if os.path.exists(self.checkpoints_path):
 			with open(self.checkpoints_path) as f:
 				tmp = json.load(f)
-				if 'checkpoints' in tmp:
-					if (isinstance(tmp['checkpoints'], dict)):
-						self.checkpoints = tmp
-					else:
-						reload_checkpoints = True
+				if tmp.get('checkpoints', None) is not None:
+					self.checkpoints = tmp
 				else:
 					reload_checkpoints = True
 		else:
@@ -174,7 +195,7 @@ class Manager:
 
 
 	def checkpointing(self,
-		epoch: int,
+		step: int,
 		train_loss: float,
 		test_loss: float,
 		wer: float,
@@ -184,7 +205,7 @@ class Manager:
 		'''
 		if config.no_footprint:
 			return
-		path = self.create_model_path(epoch)
+		path = self.create_model_path(step)
 
 
 		torch.save({
@@ -194,17 +215,17 @@ class Manager:
 			'test_loss': test_loss,
 			'train_loss': train_loss,
 			'wer': wer,
-			'epoch': epoch,
+			'step': step,
 			'path': path,
 			'steps': self.steps,
 			'var': self.var,
 			}, path)
-		self.checkpoints['checkpoints'][epoch] = {
+		self.checkpoints['checkpoints'][step] = {
 			'model_name': config.model_name,
 			'test_loss': test_loss,
 			'train_loss': train_loss,
 			'wer': wer,
-			'epoch': epoch,
+			'step': step,
 			'path': path,
 			'steps': self.steps,
 			'var': self.var,
@@ -248,7 +269,7 @@ class Manager:
 
 	def before_train(self) -> NoReturn:
 		'''
-			To do before training.
+			Set train mode and load a model if any.
 		'''
 
 		if config.model_mode in ('train',):
@@ -264,7 +285,7 @@ class Manager:
 
 	def before_test(self) -> NoReturn:
 		'''
-			To do before test
+			Set test mode in case of live and test
 		'''
 		if config.model_mode in ('live', 'test'):
 			self.model.eval()
@@ -272,19 +293,24 @@ class Manager:
 
 	def after_train(self) -> NoReturn:
 		'''
-			To do after training.
+			Save checkpoints, plot metrics, add results to a csv file.
 		'''
+		ensemble_weights = self.weighted_average_model_weights(self.checkpoints)
+		self.model.load_state_dict(ensemble_weights)
+		final_loss = self.calculate_loss(steps=config.test_steps * 2)
+		final_res = self.comprehensive_test(mode='main')
+		# ...
 		if config.model_mode == 'train':
 			if config.no_footprint:
 				return
 			self.save_checkpoints()
-			wer, train_loss, test_loss, key = util.plot_metrics(self.metrics, self.train_id)
+			wer, train_loss, test_loss = util.plot_metrics(self.metrics, self.train_id)
 			if wer == -1: # no data
 				return
 			with open('results/results.csv', 'a') as fp:
 				mtps = sum(self.metrics['time_per_sample']) / len(self.metrics['time_per_sample'])
 				rtf = mtps / config.chunk_length
-				test_ratio = self.metrics[key][0][5]
+				test_ratio = self.metrics['instances'][0][5]
 				config.logger.info(f"Average time per sample: {mtps}")
 				config.logger.info(f"Real Time Factor: {rtf}")
 				fp.write(f"{get_timestamp()},{self.train_id},{wer},{train_loss},{test_loss},{config.nlayers},{config.nheads},{config.dim},{config.batch_size},{config.causal_mode},{config.nar},{mtps},{test_ratio},{config.freeze_encoder},{config.freeze_decoder},{config.dataset_name},{rtf}\n")
@@ -297,7 +323,8 @@ class Manager:
 		'''
 		out = {}
 		for split in (('train', self.dataset_train), ('test', self.dataset_test)):
-			losses = torch.zeros(steps if steps > 0 else len(split[1]))
+			nsteps = steps if steps > 0 else len(split[1])
+			losses = torch.zeros(nsteps)
 			for k, chunk in enumerate(split[1]):
 				mel, sequence, labels = chunk
 				seq_len = sequence.size(1)
@@ -309,7 +336,7 @@ class Manager:
 						labels,
 					)
 				losses[k] = loss.item()
-				if k + 1 == losses.size(0):
+				if k + 1 == nsteps:
 					break
 			out[split[0]] = losses.mean()
 
@@ -319,38 +346,41 @@ class Manager:
 	@torch.no_grad()
 	def test(self,
 		epoch: int,
-		step: int = None,
-		mode: str = 'micro',
+		step: int,
+		test_cond: int,
 	) -> NoReturn:
 		'''
-			Test the model.
+			Capture metrics.
 		'''
 		self.model.eval()
-		loss = self.calculate_loss(steps=-1 if mode == 'main' else config.test_steps)
+		loss = self.calculate_loss(steps=config.test_steps)
 
-		config.logger.info(f"[{mode}][{epoch}][{step}/{len(self.dataset_train)}] > train: {round(loss['train'].item(), 4)}, test: {round(loss['test'].item(), 4)}")
+		config.logger.info(f"[{epoch}][{step}/{len(self.dataset_train)}] > train: {round(loss['train'].item(), 4)}, test: {round(loss['test'].item(), 4)}")
 
 		if config.wandb:
 			wandb.log({
-				f"test_{mode}/loss": loss['test'],
-				f"test_{mode}/perplexity": round(torch.exp(loss['test']).item(), 5),
-				f"train_{mode}/loss": loss['train'],
-				f"train_{mode}/perplexity": round(torch.exp(loss['train']).item(), 5),
+				f"test/loss": loss['test'],
+				f"test/perplexity": round(torch.exp(loss['test']).item(), 5),
+				f"train/loss": loss['train'],
+				f"train/perplexity": round(torch.exp(loss['train']).item(), 5),
 			})
 
-		res = self.comprehensive_test(mode=mode)
+		res = self.comprehensive_test()
 		if config.save_checkpoints:
 			self.checkpointing(
-				epoch, loss['train'].item(), loss['test'].item(), res['wer'])
-		
-		self.metrics[mode].append((
+				self.steps // test_cond, loss['train'].item(), loss['test'].item(), res['wer'])
+
+		self.metrics['instances'].append((
 			epoch, step,
 			loss['train'], loss['test'],
 			res['wer'],
 			res['test_ratio'],
 		))
 		self.metrics['time_per_sample'].append(res['time_per_sample'])
-
+		if config.wandb and self.mode == 'train':
+			wandb.log({
+				f"test/wer": res['wer'],
+			})
 		self.model.train()
 
 
@@ -359,6 +389,7 @@ class Manager:
 			Train for one epoch.
 		'''
 		epoch_loss = 0
+		test_cond = len(self.dataset_train) // 4
 		for step, chunk in enumerate(self.dataset_train):
 			lr = self.get_lr(self.steps + 1) if not config.fine_tune else 1e-4
 
@@ -384,8 +415,8 @@ class Manager:
 
 			epoch_loss += loss.detach()
 			print(step, end='\r')
-			if step % 100 == 99:
-				self.test(epoch=epoch, step=step, mode='micro')
+			if step % test_cond == test_cond - 1:
+				self.test(epoch=epoch, step=step, test_cond=test_cond)
 			self.steps += 1
 
 
@@ -397,11 +428,8 @@ class Manager:
 		self.before_train()
 
 		for epoch in range(config.epoch):
-			test_cond = epoch % config.test_freq == config.test_freq - 1
 			try:
 				self.train_loop(epoch)
-				if test_cond:
-					self.test(epoch=epoch, step=len(self.dataset_train), mode='main')
 			except KeyboardInterrupt:
 				print(f"Keyboard interrupt at epoch {epoch}.")
 				break
@@ -418,6 +446,7 @@ class Manager:
 		self.before_test()
 		datalen = len(self.dataset_test)
 		n_samples = min(datalen, 32) if config.partial_test else datalen
+		n_samples = n_samples if mode == 'micro' else datalen # for final test
 
 		test_ratio = n_samples / len(self.dataset_test)
 		results = {}
@@ -466,11 +495,6 @@ class Manager:
 		config.logger.info(f"\t\ttotal time({mode}): {round(total_time, 4)}")
 		config.logger.info(f"\t\ttime per sample({mode}): {round(time_per_sample, 8)}")
 		config.logger.info(f"\t\ttest ratio({mode}): {round(test_ratio, 4)}")
-
-		if config.wandb and self.mode == 'train':
-			wandb.log({
-				f"test_{mode}/wer": wer,
-			})
 
 		return results
 
