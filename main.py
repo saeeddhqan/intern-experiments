@@ -24,10 +24,10 @@ def set_seed(seed: int):
 	torch.manual_seed(seed)
 	torch.cuda.manual_seed(seed)
 	torch.cuda.manual_seed_all(seed)
+wandb.require('core')
 set_seed(1244)
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
-wandb.require('core')
 
 def get_timestamp():
 	now = datetime.now()

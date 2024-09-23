@@ -109,7 +109,6 @@ class TextProcess:
 
 		self.clean = lambda s: s.replace(self.sot, '').replace(self.eot, '').replace(self.pad, '').replace(self.etc, '')
 
-
 	def __len__(self) -> int:
 		return self.vocab_size
 
