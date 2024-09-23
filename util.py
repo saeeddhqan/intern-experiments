@@ -22,6 +22,7 @@ class Config:
 	def __init__(self, data_dict: dict) -> NoReturn:
 		self.__data_dict__ = data_dict
 
+
 	def __getattr__(self, k: Union[int, str, bytes]) -> Any:
 		if k in self.__data_dict__:
 			return self.__data_dict__[k]
@@ -234,32 +235,29 @@ def plot_metrics(metrics_list: Dict, train_id: str) -> Tuple:
 	"""
 
 	key_plot = 'micro' if config.epoch < 50 and len(metrics_list['micro']) > 0 else 'main'
-	best_metrics = (-1, -1, -1, key_plot)
-	if metrics_list['main'] == [] and metrics_list['micro'] == []:
+	best_metrics = (-1, -1, -1)
+	if metrics_list['instances'] == []:
 		return best_metrics
-	wer = [t[4] for t in metrics_list['main']] + [t[4] for t in metrics_list['micro']]
+	wer = [t[4] for t in metrics_list['instances']]
 	min_wer = min(wer)
 
-	train_losses = {'main': [], 'micro': []}
-	test_losses = {'main': [], 'micro': []}
-	wers = {'main': [], 'micro': []}
-	for key in ('main', 'micro'):
-		for t in metrics_list[key]:
-			if t[4] == min_wer:
-				best_metrics = (min_wer, t[2].item(), t[3].item(), key)
-			train_losses[key].append(t[2].item())
-			test_losses[key].append(t[3].item())
-			wers[key].append(t[4])
+	train_losses = []
+	test_losses = []
+	wers = []
+	for t in metrics_list['instances']:
+		if t[4] == min_wer:
+			best_metrics = (min_wer, t[2].item(), t[3].item())
+		train_losses.append(t[2].item())
+		test_losses.append(t[3].item())
+		wers.append(t[4])
 
 
 	json.dump([train_losses, test_losses, wers], open(f"logs/{train_id}.json", 'w'))
 
-	config.logger.info(f"Using {key_plot} for plots")
+	combined_steps = np.arange(len(train_losses))
 
-	combined_steps = np.arange(len(train_losses[key_plot]))
-
-	plt.plot(combined_steps, train_losses[key_plot], label='Train Loss')
-	plt.plot(combined_steps, test_losses[key_plot], label='Test Loss')
+	plt.plot(combined_steps, train_losses, label='Train Loss')
+	plt.plot(combined_steps, test_losses, label='Test Loss')
 	plt.title('Loss')
 	plt.xlabel('Epoch')
 	plt.ylabel('Loss')
@@ -268,7 +266,7 @@ def plot_metrics(metrics_list: Dict, train_id: str) -> Tuple:
 	plt.savefig(f"logs/{train_id}_loss.png")
 	plt.clf()
 
-	plt.plot(combined_steps, wers[key_plot])
+	plt.plot(combined_steps, wers)
 	plt.title('Word Error Rate')
 	plt.xlabel('Epoch')
 	plt.ylabel('WER')
@@ -327,7 +325,7 @@ params = {
 	'checkpoint_dir': 'checkpoints',
 	'log_dir': 'logs',
 	'epoch': 500,
-	'test_steps': 40,
+	'test_steps': 64,
 	'model_mode': 'train',
 	'test_freq': 5,
 	'batch_size': 16,
@@ -377,7 +375,7 @@ params = {
 	'freeze_encoder': False,
 	'freeze_decoder': False,
 	'wandb': False,
-	'save_checkpoints': False,
+	'save_checkpoints': True,
 	'partial_test': False,
 	'logger': None,
 }
@@ -628,17 +626,8 @@ def log_mel_spectrogram(
 	augmentator: Optional[Augmentator] = None,
 ) -> Tensor:
 
-	if isinstance(audio, str):
-		audio_path = audio
-		if audio_path not in cache:
-			audio = load_audio(audio)
-			audio = torch.from_numpy(audio)
-			cache[audio_path] = audio
-		else:
-			audio = cache[audio_path]
-	if isinstance(audio, np.ndarray):
-		audio = torch.from_numpy(audio)
-
+	audio = load_audio(audio)
+	audio = torch.from_numpy(audio)
 	# if augmentator is not None:
 		# audio = augmentator(audio.view(1, -1), before_or_after='before').view(-1)
 
