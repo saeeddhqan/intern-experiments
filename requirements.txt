@@ -9,12 +9,8 @@ datasets
 transformers
 sentencepiece
 einops
-flash_attn
-encodec
-triton
 Ninja
 timm
-causal-conv1d
 librosa
 matplotlib
 torchmetrics

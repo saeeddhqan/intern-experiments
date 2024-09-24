@@ -10,7 +10,7 @@ from datetime import datetime
 import util, model, time, argparse
 import torch
 from torch import Tensor
-
+import torch.nn.functional as F
 from concurrent.futures import ThreadPoolExecutor
 from util import config
 from torch.utils.data import DataLoader
@@ -27,7 +27,6 @@ def set_seed(seed: int):
 set_seed(1244)
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
-wandb.require('core')
 
 
 def get_timestamp():
@@ -83,6 +82,8 @@ class Manager:
 
 		losses = [checkpoint[1]['wer'] for checkpoint in sorted_checkpoints]
 		paths = [checkpoint[1]['path'] for checkpoint in sorted_checkpoints]
+		if method == 'best':
+			return torch.load(paths[0])['model']
 
 		test_losses_neg = torch.tensor([loss for loss in losses])
 		test_losses_neg = -(test_losses_neg / test_losses_neg.max())
@@ -237,7 +238,7 @@ class Manager:
 		self.save_checkpoints()
 
 
-	def resume(self, path: str) -> NoReturn:
+	def resume(self, path: str, train_id: bool = False) -> NoReturn:
 		'''
 			Load a model.
 		'''
@@ -258,6 +259,11 @@ class Manager:
 			self.model.encoder.load_state_dict(encoder)
 			self.model.decoder.load_state_dict(decoder)
 			return
+		if train_id and config.mode == 'test':
+			with open('checkpoints/' + path + '.json') as f:
+				self.checkpoints = json.load(f)
+			return
+
 		try:
 			checkpoint = torch.load(path)
 			self.model.load_state_dict(checkpoint['model'])
@@ -299,23 +305,12 @@ class Manager:
 		'''
 			Save checkpoints, plot metrics, add results to a csv file.
 		'''
-		best_loss = self.calculate_loss(steps=config.test_steps * 2)
-		best_res = self.comprehensive_test(mode='main')
-
-		ensemble_weights = self.weighted_average_model_weights(self.checkpoints['checkpoints'], method='ensemble')
-		self.model.load_state_dict(ensemble_weights)
-
-		ensemble_loss = self.calculate_loss(steps=config.test_steps * 2)
-		ensemble_res = self.comprehensive_test(mode='main')
-
-		mean_weights = self.weighted_average_model_weights(self.checkpoints['checkpoints'], method='mean')
-		self.model.load_state_dict(ensemble_weights)
-
-		mean_loss = self.calculate_loss(steps=config.test_steps * 2)
-		mean_res = self.comprehensive_test(mode='main')
-		config.logger.info(f"Best model [test loss, train loss, wer]: {best_loss['test']}, {best_loss['train']}, {best_res['wer']}")
-		config.logger.info(f"Ensemble model [test loss, train loss, wer]: {ensemble_loss['test']}, {ensemble_loss['train']}, {ensemble_res['wer']}")
-		config.logger.info(f"Mean model [test loss, train loss, wer]: {mean_loss['test']}, {mean_loss['train']}, {mean_res['wer']}")
+		for method in ('ensemble', 'mean', 'best'):
+			weights = self.weighted_average_model_weights(self.checkpoints['checkpoints'], method=method)
+			self.model.load_state_dict(weights)
+			loss = self.calculate_loss(steps=config.test_steps * 2)
+			metrics = self.comprehensive_test(mode='main')
+			config.logger.info(f"{method} method (test loss, train loss, wer, rtf): {loss['test']}, {loss['train']}, {metrics['wer']}, {metrics['rtf']}")
 
 		if config.model_mode == 'train':
 			if config.no_footprint:
@@ -411,7 +406,7 @@ class Manager:
 			Train for one epoch.
 		'''
 		epoch_loss = 0
-		test_cond = len(self.dataset_train) // 4
+		test_cond = max(len(self.dataset_train) // 4, 1)
 		for step, chunk in enumerate(self.dataset_train):
 			lr = self.get_lr(self.steps + 1) if not config.fine_tune else 1e-4
 
@@ -510,6 +505,7 @@ class Manager:
 		results['wer'] = wer
 		results['time_per_batch'] = time_per_batch
 		results['time_per_sample'] = time_per_sample
+		results['rtf'] = time_per_sample / config.chunk_length
 		results['n_samples'] = n_samples
 		results['test_ratio'] = test_ratio
 
@@ -612,10 +608,7 @@ if __name__ == '__main__':
 			manager.live_demo()
 		case 'test':
 			config.mode = 'test'
-			manager.resume(config.model_path)
-			results = manager.comprehensive_test()
-			for key in results:
-				key_title = key.replace('_', ' ').title()
-				print(f"{key_title}:\n\t{results[key]}")
+			manager.resume(config.model_path, train_id=True)
+			manager.after_train()
 		case _ :
 			print('Invalid action.')
