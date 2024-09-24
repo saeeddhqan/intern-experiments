@@ -71,11 +71,13 @@ class Manager:
 		config.logger.info(f"Dataset train len: {len(self.dataset_train)}")
 		config.logger.info(f"Dataset test len: {len(self.dataset_test)}")
 
+
 	def weighted_average_model_weights(
 		self,
 		checkpoint_dict: Dict,
 		n: int = 5,
 		alpha: float = 1.0,
+		method: str = 'ensemble'
 	) -> Dict:
 		sorted_checkpoints = sorted(checkpoint_dict.items(), key=lambda x: x[1]['wer'])[:n]
 
@@ -85,14 +87,17 @@ class Manager:
 		test_losses_neg = torch.tensor([loss for loss in losses])
 		test_losses_neg = -(test_losses_neg / test_losses_neg.max())
 		softmax_weights = F.softmax(torch.tensor(test_losses_neg) * alpha, dim=0) # Softmax of negative losses
-
 		averaged_weights = None
 		for i, path in enumerate(paths):
 			model_weights = torch.load(path)['model']
 			if averaged_weights is None:
 				averaged_weights = {key: torch.zeros_like(val) for key, val in model_weights.items()}
 			for key in averaged_weights:
-				averaged_weights[key] += softmax_weights[i] * model_weights[key]
+				if method == 'ensemble':
+					averaged_weights[key] += softmax_weights[i] * model_weights[key]
+				else:
+					averaged_weights[key] += model_weights[key] / n
+
 		return averaged_weights
 
 
@@ -207,7 +212,6 @@ class Manager:
 			return
 		path = self.create_model_path(step)
 
-
 		torch.save({
 			'optimizer': self.optimizer.state_dict(),
 			'model': self.model.state_dict(),
@@ -295,25 +299,43 @@ class Manager:
 		'''
 			Save checkpoints, plot metrics, add results to a csv file.
 		'''
-		ensemble_weights = self.weighted_average_model_weights(self.checkpoints)
+		best_loss = self.calculate_loss(steps=config.test_steps * 2)
+		best_res = self.comprehensive_test(mode='main')
+
+		ensemble_weights = self.weighted_average_model_weights(self.checkpoints['checkpoints'], method='ensemble')
 		self.model.load_state_dict(ensemble_weights)
-		final_loss = self.calculate_loss(steps=config.test_steps * 2)
-		final_res = self.comprehensive_test(mode='main')
-		# ...
+
+		ensemble_loss = self.calculate_loss(steps=config.test_steps * 2)
+		ensemble_res = self.comprehensive_test(mode='main')
+
+		mean_weights = self.weighted_average_model_weights(self.checkpoints['checkpoints'], method='mean')
+		self.model.load_state_dict(ensemble_weights)
+
+		mean_loss = self.calculate_loss(steps=config.test_steps * 2)
+		mean_res = self.comprehensive_test(mode='main')
+		config.logger.info(f"Best model [test loss, train loss, wer]: {best_loss['test']}, {best_loss['train']}, {best_res['wer']}")
+		config.logger.info(f"Ensemble model [test loss, train loss, wer]: {ensemble_loss['test']}, {ensemble_loss['train']}, {ensemble_res['wer']}")
+		config.logger.info(f"Mean model [test loss, train loss, wer]: {mean_loss['test']}, {mean_loss['train']}, {mean_res['wer']}")
+
 		if config.model_mode == 'train':
 			if config.no_footprint:
 				return
 			self.save_checkpoints()
 			wer, train_loss, test_loss = util.plot_metrics(self.metrics, self.train_id)
-			if wer == -1: # no data
-				return
 			with open('results/results.csv', 'a') as fp:
 				mtps = sum(self.metrics['time_per_sample']) / len(self.metrics['time_per_sample'])
 				rtf = mtps / config.chunk_length
 				test_ratio = self.metrics['instances'][0][5]
 				config.logger.info(f"Average time per sample: {mtps}")
 				config.logger.info(f"Real Time Factor: {rtf}")
-				fp.write(f"{get_timestamp()},{self.train_id},{wer},{train_loss},{test_loss},{config.nlayers},{config.nheads},{config.dim},{config.batch_size},{config.causal_mode},{config.nar},{mtps},{test_ratio},{config.freeze_encoder},{config.freeze_decoder},{config.dataset_name},{rtf}\n")
+				fp.write(
+					f"{get_timestamp()},{self.train_id},{wer},{train_loss},{test_loss},{config.nlayers},{config.nheads},"\
+					f"{config.dim},{config.batch_size},{config.causal_mode},{config.nar},{mtps},{test_ratio},{config.freeze_encoder},"\
+					f"{config.freeze_decoder},{config.dataset_name},{rtf},"\
+					f"{best_loss['train']},{best_loss['test']},{best_res['wer']},"\
+					f"{ensemble_loss['train']},{ensemble_loss['test']},{ensemble_res['wer']},"\
+					f"{mean_loss['train']},{mean_loss['test']},{mean_res['wer']}\n"\
+				)
 
 
 	@torch.no_grad()

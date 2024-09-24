@@ -229,7 +229,7 @@ def plot_metrics(metrics_list: Dict, train_id: str) -> Tuple:
 		Parameters
 		----------
 		metrics_list: dict
-			A list of metrics captured after some epochs specified by test_freq
+			A list of captured metrics
 		train_id: str
 			Train id
 	"""
@@ -278,7 +278,7 @@ def plot_metrics(metrics_list: Dict, train_id: str) -> Tuple:
 
 def set_dataset_specifiers() -> NoReturn:
 	if config.dataset_name == 'digits':
-		text_process = TextProcess(tokenizer_model_path='assets/boolq/boolq-tok-8k.model', tokenizer_type='digits')
+		text_process = TextProcess(tokenizer_type='digits')
 		CHUNK_LENGTH = 7
 		seqlen = 7
 	elif config.dataset_name == 'boolq':
@@ -288,7 +288,7 @@ def set_dataset_specifiers() -> NoReturn:
 	else:
 		text_process = TextProcess(tokenizer_type='whisper')
 		CHUNK_LENGTH = 30
-		seqlen = 128
+		seqlen = 128 # 448
 
 	SAMPLE_RATE = 16000
 	N_SAMPLES = CHUNK_LENGTH * SAMPLE_RATE
@@ -327,11 +327,10 @@ params = {
 	'epoch': 500,
 	'test_steps': 64,
 	'model_mode': 'train',
-	'test_freq': 5,
 	'batch_size': 16,
 	'seqlen': None,
 	'n_vocab': None,
-	'specaug_rate': 0.0,
+	'specaug_rate': 0.2,
 	'freq_mask': 27,
 	'time_mask': 70,
 	'sample_rate': 16000, 
@@ -342,9 +341,9 @@ params = {
 	'n_samples': None,
 	'n_frames': None,
 	'accumulation_steps': 1,
-	'dtype': torch.float32,
+	'dtype': torch.float16,
 	'dim': 64,
-	'nlayers': 4,
+	'nlayers': 6,
 	'nheads': 2,
 
 	'use_noise_background': True,
@@ -628,8 +627,9 @@ def log_mel_spectrogram(
 
 	audio = load_audio(audio)
 	audio = torch.from_numpy(audio)
-	# if augmentator is not None:
-		# audio = augmentator(audio.view(1, -1), before_or_after='before').view(-1)
+
+	if augmentator is not None:
+		audio = augmentator(audio.view(1, -1), before_or_after='before').view(-1)
 
 	if device is not None:
 		audio = audio.to(device)
@@ -659,8 +659,8 @@ def prepare_audio(
 	mel = log_mel_spectrogram(audio, padding=config.n_samples, device=device, augmentator=augmentator)
 	mel = pad_or_trim(mel, config.n_frames)
 
-	if augmentator:
-		mel = apply_spec_augment(mel)
+	# if augmentator:
+		# mel = apply_spec_augment(mel)
 
 	return mel
 
