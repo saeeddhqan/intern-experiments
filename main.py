@@ -225,18 +225,18 @@ class Manager:
 			self.top_model_scores = self.top_model_scores[:-1]
 			self.top_model_scores.append(wer)
 
-		torch.save({
-			'optimizer': self.optimizer.state_dict(),
-			'model': self.model.state_dict(),
-			'model_name': config.model_name,
-			'test_loss': test_loss,
-			'train_loss': train_loss,
-			'wer': wer,
-			'step': step,
-			'path': path,
-			'steps': self.steps,
-			'var': self.var,
-			}, path)
+		# torch.save({
+		# 	'optimizer': self.optimizer.state_dict(),
+		# 	'model': self.model.state_dict(),
+		# 	'model_name': config.model_name,
+		# 	'test_loss': test_loss,
+		# 	'train_loss': train_loss,
+		# 	'wer': wer,
+		# 	'step': step,
+		# 	'path': path,
+		# 	'steps': self.steps,
+		# 	'var': self.var,
+		# 	}, path)
 		self.checkpoints['checkpoints'][step] = {
 			'model_name': config.model_name,
 			'test_loss': test_loss,
@@ -420,10 +420,10 @@ class Manager:
 		epoch_loss = 0
 		test_cond = max(len(self.dataset_train) // 4, 1)
 		for step, chunk in enumerate(self.dataset_train):
-			lr = self.get_lr(self.steps + 1) if not config.fine_tune else 1e-4
+			# lr = self.get_lr(self.steps + 1) if not config.fine_tune else 1e-4
 
-			for param_group in self.optimizer.param_groups:
-				param_group['lr'] = lr
+			# for param_group in self.optimizer.param_groups:
+			# 	param_group['lr'] = lr
 
 			mel, sequence, labels = chunk
 			with config.autocast:
@@ -441,6 +441,8 @@ class Manager:
 				self.optimizer.zero_grad(set_to_none=True)
 				if config.device == 'cuda':
 					torch.cuda.synchronize()
+				# self.test(epoch=epoch, step=step, test_cond=test_cond)
+
 
 			epoch_loss += loss.detach()
 			print(step, end='\r')
@@ -474,7 +476,7 @@ class Manager:
 		'''
 		self.before_test()
 		datalen = len(self.dataset_test)
-		n_samples = min(datalen, 32) if config.partial_test else datalen
+		n_samples = min(datalen, config.test_steps) if config.partial_test else datalen
 		n_samples = n_samples if mode == 'micro' else datalen # for final test
 
 		test_ratio = n_samples / len(self.dataset_test)
