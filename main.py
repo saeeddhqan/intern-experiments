@@ -16,7 +16,7 @@ from util import config
 from torch.utils.data import DataLoader
 import numpy as np
 from typing import Union, Optional, Iterable, NoReturn, Dict, Tuple
-
+from torch.cuda.amp import autocast, GradScaler
 
 def set_seed(seed: int):
 	random.seed(seed)
@@ -71,7 +71,7 @@ class Manager:
 		self.init_config()
 		config.logger.info(f"Dataset train len: {len(self.dataset_train)}")
 		config.logger.info(f"Dataset test len: {len(self.dataset_test)}")
-
+		self.scaler = GradScaler()
 
 	def weighted_average_model_weights(
 		self,
@@ -116,7 +116,7 @@ class Manager:
 				param.requires_grad = False
 
 		self.optimizer = torch.optim.Adam(self.model.parameters(),
-			lr=1e-4, betas=(0.9, 0.98), fused=True)
+			lr=5e-5, betas=(0.9, 0.999), fused=True)
 
 		if self.mode == 'train':
 			made_checkpoints_dir = False
@@ -225,18 +225,18 @@ class Manager:
 			self.top_model_scores = self.top_model_scores[:-1]
 			self.top_model_scores.append(wer)
 
-		# torch.save({
-		# 	'optimizer': self.optimizer.state_dict(),
-		# 	'model': self.model.state_dict(),
-		# 	'model_name': config.model_name,
-		# 	'test_loss': test_loss,
-		# 	'train_loss': train_loss,
-		# 	'wer': wer,
-		# 	'step': step,
-		# 	'path': path,
-		# 	'steps': self.steps,
-		# 	'var': self.var,
-		# 	}, path)
+		torch.save({
+			'optimizer': self.optimizer.state_dict(),
+			'model': self.model.state_dict(),
+			'model_name': config.model_name,
+			'test_loss': test_loss,
+			'train_loss': train_loss,
+			'wer': wer,
+			'step': step,
+			'path': path,
+			'steps': self.steps,
+			'var': self.var,
+			}, path)
 		self.checkpoints['checkpoints'][step] = {
 			'model_name': config.model_name,
 			'test_loss': test_loss,
@@ -417,7 +417,6 @@ class Manager:
 		'''
 			Train for one epoch.
 		'''
-		epoch_loss = 0
 		test_cond = max(len(self.dataset_train) // 4, 1)
 		for step, chunk in enumerate(self.dataset_train):
 			# lr = self.get_lr(self.steps + 1) if not config.fine_tune else 1e-4
@@ -434,17 +433,16 @@ class Manager:
 				)
 
 			loss = loss / config.accumulation_steps
-			loss.backward()
-			torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1)
+			self.scaler.scale(loss).backward()
 			if (step + 1) % config.accumulation_steps == 0:
-				self.optimizer.step()
+				self.scaler.unscale_(self.optimizer)
+				torch.nn.utils.clip_grad_norm_(self.model.parameters(), 0.5)
+				self.scaler.step(self.optimizer)
+				self.scaler.update()
 				self.optimizer.zero_grad(set_to_none=True)
-				if config.device == 'cuda':
-					torch.cuda.synchronize()
-				# self.test(epoch=epoch, step=step, test_cond=test_cond)
+				# if config.device == 'cuda':
+				# 	torch.cuda.synchronize()
 
-
-			epoch_loss += loss.detach()
 			print(step, end='\r')
 			if step % test_cond == test_cond - 1:
 				self.test(epoch=epoch, step=step, test_cond=test_cond)

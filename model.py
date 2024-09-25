@@ -362,7 +362,7 @@ class Whisper(nn.Module):
 	) -> Tuple:
 
 		audio_features = self.embed_audio(mel)
-		logits = self.decoder(tokens, audio_features)
+		logits = self.decoder(tokens, audio_features).float()
 		if targets is None:
 			return logits
 		else:
