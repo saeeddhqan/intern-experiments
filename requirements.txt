@@ -9,10 +9,9 @@ datasets
 transformers
 sentencepiece
 einops
-encodec
-triton
 Ninja
 timm
 librosa
 matplotlib
+torchmetrics
 tiktoken
