@@ -66,6 +66,8 @@ class Manager:
 		self.model_path_format = None
 		self.metrics = {'instances': [], 'time_per_sample': []}
 		self.steps = 0
+		self.n_top_models = 5
+		self.top_model_scores = [float('inf') for _ in range(self.n_top_models)]
 		self.init_config()
 		config.logger.info(f"Dataset train len: {len(self.dataset_train)}")
 		config.logger.info(f"Dataset test len: {len(self.dataset_test)}")
@@ -112,7 +114,6 @@ class Manager:
 			attr = 'encoder' if config.freeze_encoder else 'decoder'
 			for param in getattr(self.model, attr).parameters():
 				param.requires_grad = False
-
 
 		self.optimizer = torch.optim.Adam(self.model.parameters(),
 			lr=1e-4, betas=(0.9, 0.98), fused=True)
@@ -212,6 +213,17 @@ class Manager:
 		if config.no_footprint:
 			return
 		path = self.create_model_path(step)
+		# The purpose is to not save all the checkpoints, but top n models.
+		# In this way, we reduce costs of gpu hosting.
+
+		if wer > max(self.top_model_scores):
+			return
+		if float('inf') in self.top_model_scores:
+			self.top_model_scores = [wer] * self.n_top_models
+		else:
+			self.top_model_scores.sort()
+			self.top_model_scores = self.top_model_scores[:-1]
+			self.top_model_scores.append(wer)
 
 		torch.save({
 			'optimizer': self.optimizer.state_dict(),
@@ -306,7 +318,7 @@ class Manager:
 			Save checkpoints, plot metrics, add results to a csv file.
 		'''
 		for method in ('ensemble', 'mean', 'best'):
-			weights = self.weighted_average_model_weights(self.checkpoints['checkpoints'], method=method)
+			weights = self.weighted_average_model_weights(self.checkpoints['checkpoints'], n=self.n_top_models, method=method)
 			self.model.load_state_dict(weights)
 			loss = self.calculate_loss(steps=config.test_steps * 2)
 			metrics = self.comprehensive_test(mode='main')
@@ -607,6 +619,13 @@ if __name__ == '__main__':
 			manager.resume(config.model_path)
 			manager.live_demo()
 		case 'test':
+			config.mode = 'test'
+			manager.resume(config.model_path)
+			results = manager.comprehensive_test()
+			for key in results:
+				key_title = key.replace('_', ' ').title()
+				print(f"{key_title}:\n\t{results[key]}")
+		case 'evaluate':
 			config.mode = 'test'
 			manager.resume(config.model_path, train_id=True)
 			manager.after_train()
