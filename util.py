@@ -628,8 +628,8 @@ def log_mel_spectrogram(
 	audio = load_audio(audio)
 	audio = torch.from_numpy(audio)
 
-	if augmentator is not None:
-		audio = augmentator(audio.view(1, -1), before_or_after='before').view(-1)
+	# if augmentator is not None:
+		# audio = augmentator(audio.view(1, -1), before_or_after='before').view(-1)
 
 	if device is not None:
 		audio = audio.to(device)
@@ -659,8 +659,8 @@ def prepare_audio(
 	mel = log_mel_spectrogram(audio, padding=config.n_samples, device=device, augmentator=augmentator)
 	mel = pad_or_trim(mel, config.n_frames)
 
-	# if augmentator:
-		# mel = apply_spec_augment(mel)
+	if augmentator:
+		mel = apply_spec_augment(mel)
 
 	return mel
 
@@ -758,25 +758,21 @@ class DataBoolq(torch.utils.data.Dataset):
 		return mel_segment.to(config.dtype), sequence, labels
 
 
-class DataLibSpeech10h(torch.utils.data.Dataset):
+class DataLibSpeech100h(torch.utils.data.Dataset):
 
 	def __init__(self, mode: str, device: Union[str, torch.device]) -> NoReturn:
 		self.device = device
 		self.text_process = config.text_process
 		self.data = []
 		self.mode = mode
-		ds = datasets.load_dataset('ahazeemi/librispeech10h')
+		ds = datasets.load_dataset('saeedq/librispeech_100h')
 
 		self.augmentator = None
 		if self.mode == 'train':
 			self.augmentator = Augmentator()
-			self.data = datasets.concatenate_datasets([ds['train.10'], ds['validation']])
+			self.data = ds['train']
 		else:
 			self.data = ds['test']
-		self.data = self.data.remove_columns('speaker_id')
-		self.data = self.data.remove_columns('chapter_id')
-		self.data = self.data.remove_columns('id')
-		self.data = self.data.remove_columns('file')
 
 
 	def __len__(self) -> int:
