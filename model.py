@@ -205,6 +205,7 @@ class AudioEncoder(nn.Module):
 		x = (x + self.positional_embedding).to(x.dtype)
 
 		assert x.shape[1:] == self.positional_embedding.shape, 'incorrect audio shape'
+
 		for i, block in enumerate(self.blocks):
 			x = block(x, mask=self.mask)
 		x = self.ln_post(x)
@@ -214,12 +215,12 @@ class AudioEncoder(nn.Module):
 class TextDecoder(nn.Module):
 	def __init__(
 		self, n_vocab: int, n_ctx: int, n_state: int,
-		n_head: int, n_layers: int, non_ar: bool
+		n_head: int, n_layers: int, nar: bool
 	) -> NoReturn:
 		super().__init__()
-		self.non_ar = non_ar
+		self.nar = nar
 		self.token_embedding = nn.Embedding(n_vocab, n_state)
-		self.positional_embedding = nn.Parameter(torch.empty(n_ctx, n_state)) # warn
+		self.positional_embedding = nn.Parameter(torch.empty(n_ctx, n_state))
 		self.n_layers = n_layers
 
 		self.blocks = nn.ModuleList(
@@ -239,10 +240,10 @@ class TextDecoder(nn.Module):
 		self.register_buffer('mask', mask, persistent=False)
 
 
-	def forward(self, x: Tensor, xa: Tensor, non_ar_test: bool = False) -> Tensor:
+	def forward(self, x: Tensor, xa: Tensor, nar_test: bool = False) -> Tensor:
 		B, T = x.shape
 
-		if self.non_ar and non_ar_test is False:
+		if self.nar and nar_test is False:
 			x = torch.zeros_like(x).to(torch.int).to(x.device)
 
 		x = self.token_embedding(x) + self.positional_embedding[:T].view(1, T, -1)
@@ -280,7 +281,7 @@ class Whisper(nn.Module):
 			params.dim,
 			params.nheads,
 			params.nlayers,
-			params.non_ar,
+			params.nar,
 		)
 		self.apply(self._init_weights)
 		print("number of parameters: %.2fM" % (self.num_params() / 1e6,))
@@ -322,9 +323,9 @@ class Whisper(nn.Module):
 		audio_features = self.embed_audio(audio_features)
 		sampling_method = 'greedy'
 		B = audio_features.size(0)
-		if self.params.non_ar:
-			seq = torch.zeros(B, self.params.seq_len, dtype=torch.int, device=self.params.device)
-			logits = self.decoder(seq, audio_features, non_ar_test=True)
+		if self.params.nar:
+			seq = torch.zeros(B, self.params.seqlen - 1, dtype=torch.int, device=self.params.device) # - 1 for removing eot
+			logits = self.decoder(seq, audio_features, nar_test=True)
 			if sampling_method == 'greedy':
 				preds = torch.argmax(logits, dim=-1)
 			elif sampling_method == 'multinomial':
@@ -367,7 +368,7 @@ class Whisper(nn.Module):
 		else:
 			loss = F.cross_entropy(
 				logits.view(-1, self.vocab_size),
-				targets.flatten() if not self.params.non_ar else tokens.flatten(),
+				targets.flatten() if not self.params.nar else tokens.flatten(),
 			)
 
 		return logits, loss

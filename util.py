@@ -13,12 +13,15 @@ import math, os, pathlib, random, argparse, json, re
 import sentencepiece, datasets, tqdm, hashlib, urllib
 import tokenizer
 
-from torchmetrics.text import WordErrorRate
-wer_calculate = WordErrorRate()
+from torchmetrics.text import WordErrorRate, CharErrorRate
+calculate_wer = WordErrorRate()
+calculate_cer = CharErrorRate()
+
 
 class Config:
 	def __init__(self, data_dict: dict) -> NoReturn:
 		self.__data_dict__ = data_dict
+
 
 	def __getattr__(self, k: Union[int, str, bytes]) -> Any:
 		if k in self.__data_dict__:
@@ -193,12 +196,9 @@ def download_whisper(url: str, root: str) -> str:
 	return download_target
 
 
-def get_logger(
-	log_dir: str,
-	name: str,
+def get_logger(log_dir: str, name: str,
 	log_filename: str = 'log',
-	require_writer: bool = True,
-) -> ClassVar:
+	require_writer: bool = True) -> ClassVar:
 
 	os.makedirs(log_dir, exist_ok=True)
 
@@ -229,38 +229,35 @@ def plot_metrics(metrics_list: Dict, train_id: str) -> Tuple:
 		Parameters
 		----------
 		metrics_list: dict
-			A list of metrics captured after some epochs specified by test_freq
+			A list of captured metrics
 		train_id: str
 			Train id
 	"""
 
 	key_plot = 'micro' if config.epoch < 50 and len(metrics_list['micro']) > 0 else 'main'
-	best_metrics = (-1, -1, -1, key_plot)
-	if metrics_list['main'] == [] and metrics_list['micro'] == []:
+	best_metrics = (-1, -1, -1)
+	if metrics_list['instances'] == []:
 		return best_metrics
-	wer = [t[4] for t in metrics_list['main']] + [t[4] for t in metrics_list['micro']]
+	wer = [t[4] for t in metrics_list['instances']]
 	min_wer = min(wer)
 
-	train_losses = {'main': [], 'micro': []}
-	test_losses = {'main': [], 'micro': []}
-	wers = {'main': [], 'micro': []}
-	for key in metrics_list:
-		for t in metrics_list[key]:
-			if t[4] == min_wer:
-				best_metrics = (min_wer, t[2].item(), t[3].item(), key)
-			train_losses[key].append(t[2].item())
-			test_losses[key].append(t[3].item())
-			wers[key].append(t[4])
+	train_losses = []
+	test_losses = []
+	wers = []
+	for t in metrics_list['instances']:
+		if t[4] == min_wer:
+			best_metrics = (min_wer, t[2].item(), t[3].item())
+		train_losses.append(t[2].item())
+		test_losses.append(t[3].item())
+		wers.append(t[4])
 
 
 	json.dump([train_losses, test_losses, wers], open(f"logs/{train_id}.json", 'w'))
 
-	config.logger.info(f"Using {key_plot} for plots")
+	combined_steps = np.arange(len(train_losses))
 
-	combined_steps = np.arange(len(train_losses[key_plot]))
-
-	plt.plot(combined_steps, train_losses[key_plot], label='Train Loss')
-	plt.plot(combined_steps, test_losses[key_plot], label='Test Loss')
+	plt.plot(combined_steps, train_losses, label='Train Loss')
+	plt.plot(combined_steps, test_losses, label='Test Loss')
 	plt.title('Loss')
 	plt.xlabel('Epoch')
 	plt.ylabel('Loss')
@@ -269,7 +266,7 @@ def plot_metrics(metrics_list: Dict, train_id: str) -> Tuple:
 	plt.savefig(f"logs/{train_id}_loss.png")
 	plt.clf()
 
-	plt.plot(combined_steps, wers[key_plot])
+	plt.plot(combined_steps, wers)
 	plt.title('Word Error Rate')
 	plt.xlabel('Epoch')
 	plt.ylabel('WER')
@@ -280,15 +277,18 @@ def plot_metrics(metrics_list: Dict, train_id: str) -> Tuple:
 
 
 def set_dataset_specifiers() -> NoReturn:
-	extra = 0
-	if config.dataset_name == 'boolq':
+	if config.dataset_name == 'digits':
+		text_process = TextProcess(tokenizer_type='digits')
+		CHUNK_LENGTH = 7
+		seqlen = 7
+	elif config.dataset_name == 'boolq':
 		text_process = TextProcess(tokenizer_model_path='assets/boolq/boolq-tok-8k.model', tokenizer_type='sp')
 		CHUNK_LENGTH = 30
 		seqlen = 32
 	else:
 		text_process = TextProcess(tokenizer_type='whisper')
 		CHUNK_LENGTH = 30
-		seqlen = 128
+		seqlen = 128 # 448
 
 	SAMPLE_RATE = 16000
 	N_SAMPLES = CHUNK_LENGTH * SAMPLE_RATE
@@ -301,7 +301,7 @@ def set_dataset_specifiers() -> NoReturn:
 	TOKENS_PER_SECOND = SAMPLE_RATE // N_SAMPLES_PER_TOKEN  # 20ms per audio token
 	config.seqlen = seqlen
 	config.text_process = text_process
-	config.n_vocab = len(text_process) + extra
+	config.n_vocab = len(text_process)
 	config.chunk_length = CHUNK_LENGTH
 	config.n_samples = N_SAMPLES
 	config.n_frames = N_FRAMES
@@ -325,13 +325,12 @@ params = {
 	'checkpoint_dir': 'checkpoints',
 	'log_dir': 'logs',
 	'epoch': 500,
-	'test_steps': 40,
+	'test_steps': 64,
 	'model_mode': 'train',
-	'test_freq': 5,
 	'batch_size': 16,
 	'seqlen': None,
 	'n_vocab': None,
-	'specaug_rate': 0.0,
+	'specaug_rate': 0.2,
 	'freq_mask': 27,
 	'time_mask': 70,
 	'sample_rate': 16000, 
@@ -344,7 +343,7 @@ params = {
 	'accumulation_steps': 1,
 	'dtype': torch.float16,
 	'dim': 64,
-	'nlayers': 4,
+	'nlayers': 6,
 	'nheads': 2,
 
 	'use_noise_background': True,
@@ -361,21 +360,18 @@ params = {
 
 	'n_text_ctx': None,
 
-	'audio_dropout': 0.1,
-	'text_dropout': 0.1,
-	'attention_dropout': 0.1,
 	'causal_mode': 'non-causal', # causal, non-causal, grouped-causal, bw-semi-causal
 	'variation': '',
 	'model_path': '',
 	'train_id': '',
 	'dataset_name': 'digits',
-	'non_ar': False,
+	'nar': False, # non auto regressive
 	'fine_tune': False,
 	'no_footprint': False,
 	'freeze_encoder': False,
 	'freeze_decoder': False,
 	'wandb': False,
-	'save_checkpoints': False,
+	'save_checkpoints': True,
 	'partial_test': False,
 	'logger': None,
 }
@@ -531,12 +527,7 @@ def load_audio(file: str, sr: int = config.sample_rate) -> np.ndarray:
 	return np.frombuffer(out, np.int16).flatten().astype(np.float32) / 32768.0
 
 
-def pad_or_trim(
-	array,
-	length: int = config.n_samples,
-	*,
-	axis: int = -1,
-) -> Tensor:
+def pad_or_trim(array, length: int = config.n_samples, *, axis: int = -1) -> Tensor:
 	if torch.is_tensor(array):
 		if array.shape[axis] > length:
 			array = array.index_select(
@@ -631,19 +622,11 @@ def log_mel_spectrogram(
 	augmentator: Optional[Augmentator] = None,
 ) -> Tensor:
 
-	if isinstance(audio, str):
-		audio_path = audio
-		if audio_path not in cache:
-			audio = load_audio(audio)
-			audio = torch.from_numpy(audio)
-			cache[audio_path] = audio
-		else:
-			audio = cache[audio_path]
-	if isinstance(audio, np.ndarray):
-		audio = torch.from_numpy(audio)
+	audio = load_audio(audio)
+	audio = torch.from_numpy(audio)
 
-	if augmentator is not None:
-		audio = augmentator(audio.view(1, -1), before_or_after='before').view(-1)
+	# if augmentator is not None:
+	# 	audio = augmentator(audio.view(1, -1), before_or_after='before').view(-1)
 
 	if device is not None:
 		audio = audio.to(device)
@@ -673,10 +656,15 @@ def prepare_audio(
 	mel = log_mel_spectrogram(audio, padding=config.n_samples, device=device, augmentator=augmentator)
 	mel = pad_or_trim(mel, config.n_frames)
 
-	# if augmentator:
-	# 	mel = apply_spec_augment(mel)
+	if augmentator:
+		mel = apply_spec_augment(mel)
 
 	return mel
+
+
+def normalizer(txt: str) -> str:
+	txt = re.sub(r'[\?,\.\:/\]\[\{\}\=\+\(\)\!\$\%\&\*\'\"]+', '', txt)
+	return txt.lower()
 
 
 def prepare_text(
@@ -692,8 +680,48 @@ def prepare_text(
 	return sequence, labels
 
 
-class DataBoolq(torch.utils.data.Dataset):
+class DataDigits(torch.utils.data.Dataset):
+	def __init__(self, mode: Tensor, device: Union[str, torch.device]) -> NoReturn:
+		self.device = device
+		self.text_process = config.text_process
+		self.data = []
+		self.mode = mode
 
+		self.augmentator = None
+		if self.mode == 'train':
+			self.augmentator = Augmentator()
+			dir_path = config.train_path
+		else:
+			dir_path = config.test_path
+		file_list = os.listdir(dir_path)
+		for filename in file_list:
+			_, extension = os.path.splitext(filename)
+			if extension == '.txt':
+				continue
+			file_path_voice = os.path.join(dir_path, filename)
+			file_path_text = os.path.join(dir_path, filename.replace(extension, '.txt'))
+			if not (os.path.isfile(file_path_voice) and os.path.isfile(file_path_voice)):  # Check if it's a file (not a subdirectory)
+				continue
+
+			self.data.append({'key': file_path_voice, 'text': file_path_text})
+
+
+	def __len__(self) -> int:
+		return len(self.data)
+
+
+	def __getitem__(self, idx: int) -> Tuple[Tensor, Tensor, Tensor]:
+		if torch.is_tensor(idx):
+			idx = idx.item()
+
+		file_path = self.data[idx]['key']
+		mel_segment = prepare_audio(file_path, self.device, self.augmentator)
+		text = open(self.data[idx]['text']).read()
+		sequence, labels = prepare_text(text, self.device)
+		return mel_segment.to(config.dtype), sequence, labels
+
+
+class DataBoolq(torch.utils.data.Dataset):
 	def __init__(self, mode: str, device: Union[str, torch.device]) -> NoReturn:
 		self.device = device
 		self.text_process = config.text_process
@@ -713,11 +741,6 @@ class DataBoolq(torch.utils.data.Dataset):
 		self.data = self.data.remove_columns('explanation')
 
 
-	def normalizer(self, txt: str) -> str:
-		txt = re.sub(r'[\?,\.\:/\]\[\{\}\=\+\(\)\!\$\%\&\*\'\"]+', '', txt)
-		return txt.lower()
-
-
 	def __len__(self) -> int:
 		return len(self.data)
 
@@ -726,36 +749,27 @@ class DataBoolq(torch.utils.data.Dataset):
 		if torch.is_tensor(idx):
 			idx = idx.item()
 
-		text = self.normalizer(self.data[idx]['question'])
+		text = normalizer(self.data[idx]['question'])
 		mel_segment = prepare_audio(np.float32(self.data[idx]['audio']['array']), self.device, self.augmentator)
 		sequence, labels = prepare_text(text, self.device)
 		return mel_segment.to(config.dtype), sequence, labels
 
 
-class DataLibSpeech10h(torch.utils.data.Dataset):
+class DataLibSpeech100h(torch.utils.data.Dataset):
 
 	def __init__(self, mode: str, device: Union[str, torch.device]) -> NoReturn:
 		self.device = device
 		self.text_process = config.text_process
 		self.data = []
 		self.mode = mode
-		ds = datasets.load_dataset('ahazeemi/librispeech10h')
+		ds = datasets.load_dataset('saeedq/librispeech_100h')
 
 		self.augmentator = None
 		if self.mode == 'train':
 			self.augmentator = Augmentator()
-			self.data = datasets.concatenate_datasets([ds['train.10'], ds['validation']])
+			self.data = ds['train']
 		else:
 			self.data = ds['test']
-		self.data = self.data.remove_columns('speaker_id')
-		self.data = self.data.remove_columns('chapter_id')
-		self.data = self.data.remove_columns('id')
-		self.data = self.data.remove_columns('file')
-
-
-	def normalizer(self, txt: str) -> str:
-		txt = re.sub(r'[\?,\.\:/\]\[\{\}\=\+\(\)\!\$\%\&\*\'\"]+', '', txt)
-		return txt.lower()
 
 
 	def __len__(self) -> int:
@@ -766,7 +780,7 @@ class DataLibSpeech10h(torch.utils.data.Dataset):
 		if torch.is_tensor(idx):
 			idx = idx.item()
 
-		text = self.normalizer(self.data[idx]['text'])
+		text = normalizer(self.data[idx]['text'])
 		mel_segment = prepare_audio(np.float32(self.data[idx]['audio']['array']), self.device, self.augmentator)
 		sequence, labels = prepare_text(text, self.device)
 		return mel_segment.to(config.dtype), sequence, labels
