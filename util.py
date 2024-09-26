@@ -356,7 +356,7 @@ params = {
 	'noise_background_dir': 'noise_dir',
 	'regularization_on_raw_audio': True,
 	'regularization_on_mel': False,
-	'regularization_on_data': True,
+	'augment': False,
 
 	'lr': 1e-3,
 	'n_audio_ctx': None,
@@ -667,8 +667,8 @@ def prepare_audio(
 	mel = log_mel_spectrogram(audio, padding=config.n_samples, device=device, augmentator=augmentator)
 	mel = pad_or_trim(mel, config.n_frames)
 
-	# if augmentator:
-		# mel = apply_spec_augment(mel)
+	if augmentator:
+		mel = apply_spec_augment(mel)
 
 	return mel
 
@@ -700,7 +700,8 @@ class DataDigits(torch.utils.data.Dataset):
 
 		self.augmentator = None
 		if self.mode == 'train':
-			self.augmentator = Augmentator()
+			if config.augment:
+				self.augmentator = Augmentator()
 			dir_path = config.train_path
 		else:
 			dir_path = config.test_path
@@ -743,7 +744,8 @@ class DataBoolq(torch.utils.data.Dataset):
 
 		self.augmentator = None
 		if self.mode == 'train':
-			self.augmentator = Augmentator()
+			if config.augment:
+				self.augmentator = Augmentator()
 			self.data = ds['train']
 		else:
 			self.data = ds['validation']
@@ -777,7 +779,8 @@ class DataLibSpeech100h(torch.utils.data.Dataset):
 
 		self.augmentator = None
 		if self.mode == 'train':
-			self.augmentator = Augmentator()
+			if config.augment:
+				self.augmentator = Augmentator()
 			self.data = ds['train']
 		else:
 			self.data = ds['test']
@@ -788,24 +791,13 @@ class DataLibSpeech100h(torch.utils.data.Dataset):
 
 
 	def __getitem__(self, idx: int) -> Tuple[Tensor, Tensor, Tensor]:
-		if torch.is_tensor(idx):
-			idx = idx.item()
-		i = 0
-		while True:
-			try:
-				data = self.data[idx]
-			except:
-				print(f"soundfile error. try {i}")
-				time.sleep(i * 10)
-				if i == 99:
-					again = input('error persists. continue[y,n]?')
-					if again == 'y':
-						i = 0
-			i += 1
-			if i == 99:
-				break
-
-		text = normalizer(data['text'])
+		'''
+			it has a high level of influence on training speed. Avoid unnecessary structures.
+		'''
+		try:
+			data = self.data[idx]
+		except:
+			return -1, -1, -1
 		mel_segment = prepare_audio(np.float32(data['audio']['array']), self.device, self.augmentator)
-		sequence, labels = prepare_text(text, self.device)
+		sequence, labels = prepare_text(normalizer(data['text']), self.device)
 		return mel_segment.to(config.dtype), sequence, labels

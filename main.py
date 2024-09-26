@@ -206,7 +206,7 @@ class Manager:
 		train_loss: float,
 		test_loss: float,
 		wer: float,
-	) -> NoReturn:
+	) -> str:
 		'''
 			Save a model.
 		'''
@@ -248,6 +248,7 @@ class Manager:
 			'var': self.var,
 		}
 		self.save_checkpoints()
+		return path
 
 
 	def resume(self, path: str, train_id: bool = False) -> NoReturn:
@@ -293,6 +294,7 @@ class Manager:
 		'''
 			Set train mode and load a model if any.
 		'''
+		self.test_cond = max(len(self.dataset_train) // 4, 1)
 
 		if config.model_mode in ('train',):
 			self.model.train()
@@ -356,6 +358,7 @@ class Manager:
 			losses = torch.zeros(nsteps)
 			for k, chunk in enumerate(split[1]):
 				mel, sequence, labels = chunk
+				if isinstance(mel, int): continue
 				seq_len = sequence.size(1)
 
 				with config.autocast:
@@ -376,7 +379,6 @@ class Manager:
 	def test(self,
 		epoch: int,
 		step: int,
-		test_cond: int,
 	) -> NoReturn:
 		'''
 			Capture metrics.
@@ -397,7 +399,7 @@ class Manager:
 		res = self.comprehensive_test()
 		if config.save_checkpoints:
 			self.checkpointing(
-				self.steps // test_cond, loss['train'].item(), loss['test'].item(), res['wer'])
+				self.steps // self.test_cond, loss['train'].item(), loss['test'].item(), res['wer'])
 
 		self.metrics['instances'].append((
 			epoch, step,
@@ -417,7 +419,7 @@ class Manager:
 		'''
 			Train for one epoch.
 		'''
-		test_cond = max(len(self.dataset_train) // 4, 1)
+		exceptions = 0
 		for step, chunk in enumerate(self.dataset_train):
 			# lr = self.get_lr(self.steps + 1) if not config.fine_tune else 1e-4
 
@@ -425,6 +427,19 @@ class Manager:
 			# 	param_group['lr'] = lr
 
 			mel, sequence, labels = chunk
+			if isinstance(mel, int):
+				print('soundfile error.')
+				exceptions += 1
+				if exceptions == 100:
+					check = input('exceptions exceeded. Continue[y|n]?')
+					if check == 'y':
+						exceptions = 0
+					else:
+						break
+				else:
+					time.sleep(exceptions * 10)
+				continue
+
 			with config.autocast:
 				_, loss = self.model(
 					sequence,
@@ -444,8 +459,8 @@ class Manager:
 				# 	torch.cuda.synchronize()
 
 			print(step, end='\r')
-			if step % test_cond == test_cond - 1:
-				self.test(epoch=epoch, step=step, test_cond=test_cond)
+			if step % self.test_cond == self.test_cond - 1:
+				self.test(epoch=epoch, step=step)
 			self.steps += 1
 
 
@@ -455,13 +470,27 @@ class Manager:
 		'''
 
 		self.before_train()
+		epoch = 0
 
-		for epoch in range(config.epoch):
+		while True:
 			try:
 				self.train_loop(epoch)
 			except KeyboardInterrupt:
 				print(f"Keyboard interrupt at epoch {epoch}.")
 				break
+			except Exception as e:
+				print('Unexpected error.')
+				print(e)
+				check = input('do you want to retry[y|n]?')
+				if check == 'y':
+					continue
+				else:
+					config.logger.info('continue the next round with: ' + self.checkpointing(self.steps // self.test_cond, -1, -1, -1))
+					break
+			epoch += 1
+			if epoch == config.epoch - 1:
+				break
+
 		self.after_train()
 
 
@@ -485,6 +514,7 @@ class Manager:
 		took_tests = 0
 		for step, chunk in enumerate(self.dataset_test):
 			mel, sequence, labels = chunk
+			if isinstance(mel, int): continue
 			start = time.perf_counter()
 			seqx = self.model.inference(
 				mel,
