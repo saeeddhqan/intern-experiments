@@ -237,7 +237,6 @@ def plot_metrics(metrics_list: Dict, train_id: str) -> Tuple:
 			Train id
 	"""
 
-	key_plot = 'micro' if config.epoch < 50 and len(metrics_list['micro']) > 0 else 'main'
 	best_metrics = (-1, -1, -1)
 	if metrics_list['instances'] == []:
 		return best_metrics
@@ -636,8 +635,8 @@ def log_mel_spectrogram(
 	if isinstance(audio, np.ndarray):
 		audio = torch.from_numpy(audio)
 
-	# if augmentator is not None:
-	# 	audio = augmentator(audio.view(1, -1), before_or_after='before').view(-1)
+	if augmentator and config.augment:
+		audio = augmentator(audio.view(1, -1), before_or_after='before').view(-1)
 
 	if device is not None:
 		audio = audio.to(device)
@@ -667,8 +666,8 @@ def prepare_audio(
 	mel = log_mel_spectrogram(audio, padding=config.n_samples, device=device, augmentator=augmentator)
 	mel = pad_or_trim(mel, config.n_frames)
 
-	if augmentator:
-		mel = apply_spec_augment(mel)
+	# if augmentator and config.augment:
+	# 	mel = apply_spec_augment(mel)
 
 	return mel
 
@@ -683,11 +682,9 @@ def prepare_text(
 	device: Union[str, torch.device],
 ) -> Tuple[Tensor, Tensor]:
 
-	encoded = config.text_process.encoder(text, config.seqlen)
+	encoded = torch.tensor(config.text_process.encoder(text, config.seqlen)).to(device)
 	sequence = encoded[:-1]
 	labels = encoded[1:]
-	sequence = torch.tensor(sequence).to(device)
-	labels = torch.tensor(labels).to(device)
 	return sequence, labels
 
 
@@ -700,8 +697,7 @@ class DataDigits(torch.utils.data.Dataset):
 
 		self.augmentator = None
 		if self.mode == 'train':
-			if config.augment:
-				self.augmentator = Augmentator()
+			self.augmentator = Augmentator()
 			dir_path = config.train_path
 		else:
 			dir_path = config.test_path
@@ -744,8 +740,7 @@ class DataBoolq(torch.utils.data.Dataset):
 
 		self.augmentator = None
 		if self.mode == 'train':
-			if config.augment:
-				self.augmentator = Augmentator()
+			self.augmentator = Augmentator()
 			self.data = ds['train']
 		else:
 			self.data = ds['validation']
@@ -779,8 +774,7 @@ class DataLibSpeech100h(torch.utils.data.Dataset):
 
 		self.augmentator = None
 		if self.mode == 'train':
-			if config.augment:
-				self.augmentator = Augmentator()
+			self.augmentator = Augmentator()
 			self.data = ds['train']
 		else:
 			self.data = ds['test']
@@ -794,11 +788,7 @@ class DataLibSpeech100h(torch.utils.data.Dataset):
 		'''
 			it has a high level of influence on training speed. Avoid unnecessary structures.
 		'''
-		try:
-			data = self.data[idx]
-		except:
-			print('soundfile error')
-			return -1, -1, -1
+		data = self.data[idx]
 		mel_segment = prepare_audio(np.float32(data['audio']['array']), self.device, self.augmentator)
 		sequence, labels = prepare_text(normalizer(data['text']), self.device)
 		return mel_segment.to(config.dtype), sequence, labels

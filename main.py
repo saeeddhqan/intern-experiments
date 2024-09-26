@@ -67,11 +67,12 @@ class Manager:
 		self.metrics = {'instances': [], 'time_per_sample': []}
 		self.steps = 0
 		self.n_top_models = 5
-		self.top_model_scores = [float('inf') for _ in range(self.n_top_models)]
+		self.top_model_scores = [(float('inf'), '')] * self.n_top_models
 		self.init_config()
+		self.scaler = GradScaler()
+
 		config.logger.info(f"Dataset train len: {len(self.dataset_train)}")
 		config.logger.info(f"Dataset test len: {len(self.dataset_test)}")
-		self.scaler = GradScaler()
 
 	def weighted_average_model_weights(
 		self,
@@ -116,7 +117,7 @@ class Manager:
 				param.requires_grad = False
 
 		self.optimizer = torch.optim.Adam(self.model.parameters(),
-			lr=5e-5, betas=(0.9, 0.999), fused=True)
+			lr=7e-5, betas=(0.9, 0.999), fused=True)
 
 		if self.mode == 'train':
 			made_checkpoints_dir = False
@@ -200,6 +201,12 @@ class Manager:
 		with open(self.checkpoints_path, 'w') as f:
 			json.dump(self.checkpoints, f)
 
+	def remove_checkpoints(self, path: str) -> NoReturn:
+		try:
+			os.remove(file_path)
+			print(f"File {file_path} removed successfully.")
+		except Exception as e:
+			print(f"An error occurred(remove_checkpoints): {e}")
 
 	def checkpointing(self,
 		step: int,
@@ -216,14 +223,15 @@ class Manager:
 		# The purpose is to not save all the checkpoints, but top n models.
 		# In this way, we reduce costs of gpu hosting.
 
-		if wer > max(self.top_model_scores):
+		if wer > max(self.top_model_scores, key=lambda x: x[0])[0]:
 			return
-		if float('inf') in self.top_model_scores:
-			self.top_model_scores = [wer] * self.n_top_models
+		if (float('inf'), '') in self.top_model_scores:
+			self.top_model_scores = [(wer, path)] * self.n_top_models
 		else:
-			self.top_model_scores.sort()
+			self.top_model_scores.sort(key=lambda x:x[0])
+			self.remove_checkpoints(self.top_model_scores[-1][1])
 			self.top_model_scores = self.top_model_scores[:-1]
-			self.top_model_scores.append(wer)
+			self.top_model_scores.append((wer, path))
 
 		torch.save({
 			'optimizer': self.optimizer.state_dict(),
@@ -285,8 +293,9 @@ class Manager:
 		except FileNotFoundError:
 			print(f"File {path} not found.")
 			sys.exit()
-		except RuntimeError:
+		except RuntimeError as e:
 			print(f"Error loading {path}.")
+			print(e)
 			sys.exit()
 
 
@@ -358,7 +367,6 @@ class Manager:
 			losses = torch.zeros(nsteps)
 			for k, chunk in enumerate(split[1]):
 				mel, sequence, labels = chunk
-				if isinstance(mel, int): continue
 				seq_len = sequence.size(1)
 
 				with config.autocast:
@@ -427,18 +435,6 @@ class Manager:
 			# 	param_group['lr'] = lr
 
 			mel, sequence, labels = chunk
-			if isinstance(mel, int):
-				print('soundfile error.')
-				exceptions += 1
-				if exceptions == 100:
-					check = input('exceptions exceeded. Continue[y|n]?')
-					if check == 'y':
-						exceptions = 0
-					else:
-						break
-				else:
-					time.sleep(exceptions * 10)
-				continue
 
 			with config.autocast:
 				_, loss = self.model(
@@ -490,6 +486,7 @@ class Manager:
 			epoch += 1
 			if epoch == config.epoch - 1:
 				break
+			config.augment = True
 
 		self.after_train()
 
@@ -514,7 +511,6 @@ class Manager:
 		took_tests = 0
 		for step, chunk in enumerate(self.dataset_test):
 			mel, sequence, labels = chunk
-			if isinstance(mel, int): continue
 			start = time.perf_counter()
 			seqx = self.model.inference(
 				mel,
@@ -617,6 +613,7 @@ if __name__ == '__main__':
 	parser.add_argument('--freeze_encoder', action='store_true', default=config.freeze_encoder, help='freezing encoder during fine tuning')
 	parser.add_argument('--freeze_decoder', action='store_true', default=config.freeze_decoder, help='freezing decoder during fine tuning')
 	parser.add_argument('--partial_test', action='store_true', default=config.partial_test, help='use if you do not want to test the entire test set after each epoch')
+	parser.add_argument('--augment', action='store_true', default=config.augment, help='use augmentation')
 
 	args = parser.parse_args()
 
