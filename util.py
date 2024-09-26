@@ -797,6 +797,7 @@ class DataLibSpeech100h(torch.utils.data.Dataset):
 		try:
 			data = self.data[idx]
 		except:
+			print('soundfile error')
 			return -1, -1, -1
 		mel_segment = prepare_audio(np.float32(data['audio']['array']), self.device, self.augmentator)
 		sequence, labels = prepare_text(normalizer(data['text']), self.device)
