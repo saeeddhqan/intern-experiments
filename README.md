@@ -1,7 +1,7 @@
 To setup the repo:
 ```bash
 
-git clone https://github.com/saeeddhqan/intern-experiments; cd intern-experiments; git checkout whisper; pip install -r requirements.txt; apt install libsox-dev; wandb login;
+git clone https://github.com/saeeddhqan/intern-experiments; cd intern-experiments; git checkout whisper; pip install -r requirements.txt; apt install libsox-dev screen htop; wandb login; screen -S train;
 ```
 
 To train small.en with default config: 
