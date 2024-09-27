@@ -349,10 +349,7 @@ class Manager:
 				fp.write(
 					f"{get_timestamp()},{self.train_id},{wer},{train_loss},{test_loss},{config.nlayers},{config.nheads},"\
 					f"{config.dim},{config.batch_size},{config.causal_mode},{config.nar},{mtps},{test_ratio},{config.freeze_encoder},"\
-					f"{config.freeze_decoder},{config.dataset_name},{rtf},"\
-					f"{best_loss['train']},{best_loss['test']},{best_res['wer']},"\
-					f"{ensemble_loss['train']},{ensemble_loss['test']},{ensemble_res['wer']},"\
-					f"{mean_loss['train']},{mean_loss['test']},{mean_res['wer']}\n"\
+					f"{config.freeze_decoder},{config.dataset_name},{rtf}\n"\
 				)
 
 
