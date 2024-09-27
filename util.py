@@ -9,7 +9,7 @@ from torch import Tensor, nn
 import torch.nn.functional as F
 import torchaudio
 import matplotlib.pyplot as plt
-import math, os, pathlib, random, argparse, json, re
+import math, os, pathlib, random, argparse, json, re, time
 import sentencepiece, datasets, tqdm, hashlib, urllib
 import tokenizer
 
@@ -87,6 +87,7 @@ class TextProcess:
 			self.sot_i = 0
 			self.eot_i = 1
 			self.pad_i = 2
+			self.clean = lambda s: s.replace(self.sot, '').replace(self.eot, '').replace(self.pad, '').replace(self.etc, '')
 		elif tokenizer_type == 'whisper':
 			self.tokenizer = tokenizer.get_tokenizer(False, num_languages=99, language='en', task='transcribe')
 			self.encode = self.tokenizer.encode
@@ -94,11 +95,13 @@ class TextProcess:
 			self.vocab_size = self.tokenizer.encoding.n_vocab
 			self.sot_i = list(self.tokenizer.sot_sequence)
 			self.eot_i = self.tokenizer.eot
-			self.pad_i = self.tokenizer.no_speech
+			self.pad_i = self.tokenizer.encode(' ')[0]
 			self.sot = '<|startoftranscript|>'
 			self.eot = '<|endoftext|>'
-			self.pad = '<|nospeech|>'
+			self.pad = ' '
 			self.etc = '<|notimestamps|>'
+			self.nospeech = '<|nospeech|>'
+			self.clean = lambda s: s.replace(self.sot, '').replace(self.eot, '').replace(self.etc, '').replace(self.nospeech, '').strip()
 		else:
 			self.tokenizer = sentencepiece.SentencePieceProcessor(model_file=tokenizer_model_path)
 			self.encode = self.tokenizer.encode
@@ -107,8 +110,8 @@ class TextProcess:
 			self.sot_i = 1
 			self.eot_i = 2
 			self.pad_i = 3
+			self.clean = lambda s: s.replace(self.sot, '').replace(self.eot, '').replace(self.pad, '').replace(self.etc, '')
 
-		self.clean = lambda s: s.replace(self.sot, '').replace(self.eot, '').replace(self.pad, '').replace(self.etc, '')
 
 	def __len__(self) -> int:
 		return self.vocab_size
@@ -234,7 +237,6 @@ def plot_metrics(metrics_list: Dict, train_id: str) -> Tuple:
 			Train id
 	"""
 
-	key_plot = 'micro' if config.epoch < 50 and len(metrics_list['micro']) > 0 else 'main'
 	best_metrics = (-1, -1, -1)
 	if metrics_list['instances'] == []:
 		return best_metrics
@@ -353,16 +355,13 @@ params = {
 	'noise_background_dir': 'noise_dir',
 	'regularization_on_raw_audio': True,
 	'regularization_on_mel': False,
-	'regularization_on_data': True,
+	'augment': False,
 
 	'lr': 1e-3,
 	'n_audio_ctx': None,
 
 	'n_text_ctx': None,
 
-	'audio_dropout': 0.1,
-	'text_dropout': 0.1,
-	'attention_dropout': 0.1,
 	'causal_mode': 'non-causal', # causal, non-causal, grouped-causal, bw-semi-causal
 	'variation': '',
 	'model_path': '',
@@ -625,11 +624,19 @@ def log_mel_spectrogram(
 	augmentator: Optional[Augmentator] = None,
 ) -> Tensor:
 
-	audio = load_audio(audio)
-	audio = torch.from_numpy(audio)
+	if isinstance(audio, str):
+		audio_path = audio
+		if audio_path not in cache:
+			audio = load_audio(audio)
+			audio = torch.from_numpy(audio)
+			cache[audio_path] = audio
+		else:
+			audio = cache[audio_path]
+	if isinstance(audio, np.ndarray):
+		audio = torch.from_numpy(audio)
 
-	# if augmentator is not None:
-		# audio = augmentator(audio.view(1, -1), before_or_after='before').view(-1)
+	if augmentator and config.augment:
+		audio = augmentator(audio.view(1, -1), before_or_after='before').view(-1)
 
 	if device is not None:
 		audio = audio.to(device)
@@ -659,8 +666,8 @@ def prepare_audio(
 	mel = log_mel_spectrogram(audio, padding=config.n_samples, device=device, augmentator=augmentator)
 	mel = pad_or_trim(mel, config.n_frames)
 
-	if augmentator:
-		mel = apply_spec_augment(mel)
+	# if augmentator and config.augment:
+	# 	mel = apply_spec_augment(mel)
 
 	return mel
 
@@ -675,11 +682,9 @@ def prepare_text(
 	device: Union[str, torch.device],
 ) -> Tuple[Tensor, Tensor]:
 
-	encoded = config.text_process.encoder(text, config.seqlen)
+	encoded = torch.tensor(config.text_process.encoder(text, config.seqlen)).to(device)
 	sequence = encoded[:-1]
 	labels = encoded[1:]
-	sequence = torch.tensor(sequence).to(device)
-	labels = torch.tensor(labels).to(device)
 	return sequence, labels
 
 
@@ -780,10 +785,10 @@ class DataLibSpeech100h(torch.utils.data.Dataset):
 
 
 	def __getitem__(self, idx: int) -> Tuple[Tensor, Tensor, Tensor]:
-		if torch.is_tensor(idx):
-			idx = idx.item()
-
-		text = normalizer(self.data[idx]['text'])
-		mel_segment = prepare_audio(np.float32(self.data[idx]['audio']['array']), self.device, self.augmentator)
-		sequence, labels = prepare_text(text, self.device)
+		'''
+			it has a high level of influence on training speed. Avoid unnecessary structures.
+		'''
+		data = self.data[idx]
+		mel_segment = prepare_audio(np.float32(data['audio']['array']), self.device, self.augmentator)
+		sequence, labels = prepare_text(normalizer(data['text']), self.device)
 		return mel_segment.to(config.dtype), sequence, labels

@@ -16,7 +16,7 @@ from util import config
 from torch.utils.data import DataLoader
 import numpy as np
 from typing import Union, Optional, Iterable, NoReturn, Dict, Tuple
-
+from torch.cuda.amp import autocast, GradScaler
 
 def set_seed(seed: int):
 	random.seed(seed)
@@ -44,8 +44,8 @@ class Manager:
 		match config.dataset_name:
 			case 'boolq':
 				datawrapper = util.DataBoolq
-			case 'librispeech10h':
-				datawrapper = util.DataLibSpeech10h
+			case 'librispeech100h':
+				datawrapper = util.DataLibSpeech100h
 			case 'digits':
 				datawrapper = util.DataDigits
 			case _:
@@ -66,10 +66,13 @@ class Manager:
 		self.model_path_format = None
 		self.metrics = {'instances': [], 'time_per_sample': []}
 		self.steps = 0
+		self.n_top_models = 5
+		self.top_model_scores = [(float('inf'), '')] * self.n_top_models
 		self.init_config()
+		self.scaler = GradScaler()
+
 		config.logger.info(f"Dataset train len: {len(self.dataset_train)}")
 		config.logger.info(f"Dataset test len: {len(self.dataset_test)}")
-
 
 	def weighted_average_model_weights(
 		self,
@@ -113,9 +116,8 @@ class Manager:
 			for param in getattr(self.model, attr).parameters():
 				param.requires_grad = False
 
-
 		self.optimizer = torch.optim.Adam(self.model.parameters(),
-			lr=1e-4, betas=(0.9, 0.98), fused=True)
+			lr=7e-5, betas=(0.9, 0.999), fused=True)
 
 		if self.mode == 'train':
 			made_checkpoints_dir = False
@@ -199,19 +201,37 @@ class Manager:
 		with open(self.checkpoints_path, 'w') as f:
 			json.dump(self.checkpoints, f)
 
+	def remove_checkpoints(self, path: str) -> NoReturn:
+		try:
+			os.remove(file_path)
+			print(f"File {file_path} removed successfully.")
+		except Exception as e:
+			print(f"An error occurred(remove_checkpoints): {e}")
 
 	def checkpointing(self,
 		step: int,
 		train_loss: float,
 		test_loss: float,
 		wer: float,
-	) -> NoReturn:
+	) -> str:
 		'''
 			Save a model.
 		'''
 		if config.no_footprint:
 			return
 		path = self.create_model_path(step)
+		# The purpose is to not save all the checkpoints, but top n models.
+		# In this way, we reduce costs of gpu hosting.
+
+		if wer > max(self.top_model_scores, key=lambda x: x[0])[0]:
+			return
+		if (float('inf'), '') in self.top_model_scores:
+			self.top_model_scores = [(wer, path)] * self.n_top_models
+		else:
+			self.top_model_scores.sort(key=lambda x:x[0])
+			self.remove_checkpoints(self.top_model_scores[-1][1])
+			self.top_model_scores = self.top_model_scores[:-1]
+			self.top_model_scores.append((wer, path))
 
 		torch.save({
 			'optimizer': self.optimizer.state_dict(),
@@ -236,6 +256,7 @@ class Manager:
 			'var': self.var,
 		}
 		self.save_checkpoints()
+		return path
 
 
 	def resume(self, path: str, train_id: bool = False) -> NoReturn:
@@ -272,8 +293,9 @@ class Manager:
 		except FileNotFoundError:
 			print(f"File {path} not found.")
 			sys.exit()
-		except RuntimeError:
+		except RuntimeError as e:
 			print(f"Error loading {path}.")
+			print(e)
 			sys.exit()
 
 
@@ -281,6 +303,7 @@ class Manager:
 		'''
 			Set train mode and load a model if any.
 		'''
+		self.test_cond = max(len(self.dataset_train) // 4, 1)
 
 		if config.model_mode in ('train',):
 			self.model.train()
@@ -306,7 +329,7 @@ class Manager:
 			Save checkpoints, plot metrics, add results to a csv file.
 		'''
 		for method in ('ensemble', 'mean', 'best'):
-			weights = self.weighted_average_model_weights(self.checkpoints['checkpoints'], method=method)
+			weights = self.weighted_average_model_weights(self.checkpoints['checkpoints'], n=self.n_top_models, method=method)
 			self.model.load_state_dict(weights)
 			loss = self.calculate_loss(steps=config.test_steps * 2)
 			metrics = self.comprehensive_test(mode='main')
@@ -326,10 +349,7 @@ class Manager:
 				fp.write(
 					f"{get_timestamp()},{self.train_id},{wer},{train_loss},{test_loss},{config.nlayers},{config.nheads},"\
 					f"{config.dim},{config.batch_size},{config.causal_mode},{config.nar},{mtps},{test_ratio},{config.freeze_encoder},"\
-					f"{config.freeze_decoder},{config.dataset_name},{rtf},"\
-					f"{best_loss['train']},{best_loss['test']},{best_res['wer']},"\
-					f"{ensemble_loss['train']},{ensemble_loss['test']},{ensemble_res['wer']},"\
-					f"{mean_loss['train']},{mean_loss['test']},{mean_res['wer']}\n"\
+					f"{config.freeze_decoder},{config.dataset_name},{rtf}\n"\
 				)
 
 
@@ -364,7 +384,6 @@ class Manager:
 	def test(self,
 		epoch: int,
 		step: int,
-		test_cond: int,
 	) -> NoReturn:
 		'''
 			Capture metrics.
@@ -376,16 +395,16 @@ class Manager:
 
 		if config.wandb:
 			wandb.log({
-				f"test/loss": loss['test'],
-				f"test/perplexity": round(torch.exp(loss['test']).item(), 5),
-				f"train/loss": loss['train'],
-				f"train/perplexity": round(torch.exp(loss['train']).item(), 5),
+				'test/loss': loss['test'],
+				'test/perplexity': round(torch.exp(loss['test']).item(), 5),
+				'train/loss': loss['train'],
+				'train/perplexity': round(torch.exp(loss['train']).item(), 5),
 			})
 
 		res = self.comprehensive_test()
 		if config.save_checkpoints:
 			self.checkpointing(
-				self.steps // test_cond, loss['train'].item(), loss['test'].item(), res['wer'])
+				self.steps // self.test_cond, loss['train'].item(), loss['test'].item(), res['wer'])
 
 		self.metrics['instances'].append((
 			epoch, step,
@@ -405,15 +424,14 @@ class Manager:
 		'''
 			Train for one epoch.
 		'''
-		epoch_loss = 0
-		test_cond = max(len(self.dataset_train) // 4, 1)
 		for step, chunk in enumerate(self.dataset_train):
-			lr = self.get_lr(self.steps + 1) if not config.fine_tune else 1e-4
+			# lr = self.get_lr(self.steps + 1) if not config.fine_tune else 1e-4
 
-			for param_group in self.optimizer.param_groups:
-				param_group['lr'] = lr
+			# for param_group in self.optimizer.param_groups:
+			# 	param_group['lr'] = lr
 
 			mel, sequence, labels = chunk
+
 			with config.autocast:
 				_, loss = self.model(
 					sequence,
@@ -422,18 +440,19 @@ class Manager:
 				)
 
 			loss = loss / config.accumulation_steps
-			loss.backward()
-			torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1)
+			self.scaler.scale(loss).backward()
 			if (step + 1) % config.accumulation_steps == 0:
-				self.optimizer.step()
+				self.scaler.unscale_(self.optimizer)
+				torch.nn.utils.clip_grad_norm_(self.model.parameters(), 0.5)
+				self.scaler.step(self.optimizer)
+				self.scaler.update()
 				self.optimizer.zero_grad(set_to_none=True)
-				if config.device == 'cuda':
-					torch.cuda.synchronize()
+				# if config.device == 'cuda':
+				# 	torch.cuda.synchronize()
 
-			epoch_loss += loss.detach()
 			print(step, end='\r')
-			if step % test_cond == test_cond - 1:
-				self.test(epoch=epoch, step=step, test_cond=test_cond)
+			if step % self.test_cond == self.test_cond - 1:
+				self.test(epoch=epoch, step=step)
 			self.steps += 1
 
 
@@ -443,13 +462,28 @@ class Manager:
 		'''
 
 		self.before_train()
+		epoch = 0
 
-		for epoch in range(config.epoch):
+		while True:
 			try:
 				self.train_loop(epoch)
 			except KeyboardInterrupt:
 				print(f"Keyboard interrupt at epoch {epoch}.")
 				break
+			except Exception as e:
+				print('Unexpected error.')
+				print(e)
+				check = input('do you want to retry[y|n]?')
+				if check == 'y':
+					continue
+				else:
+					config.logger.info('continue the next round with: ' + self.checkpointing(self.steps // self.test_cond, -1, -1, -1))
+					break
+			epoch += 1
+			if epoch == config.epoch - 1:
+				break
+			config.augment = True
+
 		self.after_train()
 
 
@@ -462,7 +496,7 @@ class Manager:
 		'''
 		self.before_test()
 		datalen = len(self.dataset_test)
-		n_samples = min(datalen, 32) if config.partial_test else datalen
+		n_samples = min(datalen, config.test_steps) if config.partial_test else datalen
 		n_samples = n_samples if mode == 'micro' else datalen # for final test
 
 		test_ratio = n_samples / len(self.dataset_test)
@@ -567,7 +601,7 @@ if __name__ == '__main__':
 	parser.add_argument('--wandb', action='store_true', default=config.wandb, help='use wandb')
 	parser.add_argument('--save_checkpoints', action='store_true', default=config.save_checkpoints, help='save checkpoints')
 	parser.add_argument('--model_path', type=str, default=config.model_path, help='which model do you want to test')
-	parser.add_argument('--dataset_name', type=str, default=config.dataset_name, help="which dataset do you want to train/test('librispeech10h', 'boolq', 'digits')")
+	parser.add_argument('--dataset_name', type=str, default=config.dataset_name, help="which dataset do you want to train/test('librispeech100h', 'boolq', 'digits')")
 	parser.add_argument('--accumulation_steps', '-as', type=int, default=config.accumulation_steps, help='accumulation steps')
 	parser.add_argument('--nar', action='store_true', default=config.nar, help='use non auto regressive method')
 	parser.add_argument('--fine_tune', action='store_true', default=config.fine_tune, help='for fine tune')
@@ -575,6 +609,7 @@ if __name__ == '__main__':
 	parser.add_argument('--freeze_encoder', action='store_true', default=config.freeze_encoder, help='freezing encoder during fine tuning')
 	parser.add_argument('--freeze_decoder', action='store_true', default=config.freeze_decoder, help='freezing decoder during fine tuning')
 	parser.add_argument('--partial_test', action='store_true', default=config.partial_test, help='use if you do not want to test the entire test set after each epoch')
+	parser.add_argument('--augment', action='store_true', default=config.augment, help='use augmentation')
 
 	args = parser.parse_args()
 
@@ -607,6 +642,13 @@ if __name__ == '__main__':
 			manager.resume(config.model_path)
 			manager.live_demo()
 		case 'test':
+			config.mode = 'test'
+			manager.resume(config.model_path)
+			results = manager.comprehensive_test()
+			for key in results:
+				key_title = key.replace('_', ' ').title()
+				print(f"{key_title}:\n\t{results[key]}")
+		case 'evaluate':
 			config.mode = 'test'
 			manager.resume(config.model_path, train_id=True)
 			manager.after_train()

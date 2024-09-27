@@ -220,7 +220,7 @@ class TextDecoder(nn.Module):
 		super().__init__()
 		self.nar = nar
 		self.token_embedding = nn.Embedding(n_vocab, n_state)
-		self.positional_embedding = nn.Parameter(torch.empty(n_ctx, n_state).fill_(0.001))
+		self.positional_embedding = nn.Parameter(torch.empty(n_ctx, n_state))
 		self.n_layers = n_layers
 
 		self.blocks = nn.ModuleList(
@@ -362,7 +362,7 @@ class Whisper(nn.Module):
 	) -> Tuple:
 
 		audio_features = self.embed_audio(mel)
-		logits = self.decoder(tokens, audio_features)
+		logits = self.decoder(tokens, audio_features).float()
 		if targets is None:
 			return logits
 		else:
