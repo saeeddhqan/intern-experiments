@@ -398,10 +398,10 @@ class Manager:
 
 		if config.wandb:
 			wandb.log({
-				f"test/loss": loss['test'],
-				f"test/perplexity": round(torch.exp(loss['test']).item(), 5),
-				f"train/loss": loss['train'],
-				f"train/perplexity": round(torch.exp(loss['train']).item(), 5),
+				'test/loss': loss['test'],
+				'test/perplexity': round(torch.exp(loss['test']).item(), 5),
+				'train/loss': loss['train'],
+				'train/perplexity': round(torch.exp(loss['train']).item(), 5),
 			})
 
 		res = self.comprehensive_test()
@@ -427,7 +427,6 @@ class Manager:
 		'''
 			Train for one epoch.
 		'''
-		exceptions = 0
 		for step, chunk in enumerate(self.dataset_train):
 			# lr = self.get_lr(self.steps + 1) if not config.fine_tune else 1e-4
 
