@@ -67,7 +67,7 @@ class Manager:
 		self.metrics = {'instances': [], 'time_per_sample': []}
 		self.steps = 0
 		self.n_top_models = 5
-		self.top_model_scores = [(float('inf'), '')] * self.n_top_models
+		self.top_model_scores = []
 		self.init_config()
 		self.scaler = GradScaler()
 
@@ -203,10 +203,11 @@ class Manager:
 
 	def remove_checkpoints(self, path: str) -> NoReturn:
 		try:
-			os.remove(file_path)
-			print(f"File {file_path} removed successfully.")
+			os.remove(path)
+			print(f"File {path} removed successfully.")
 		except Exception as e:
 			print(f"An error occurred(remove_checkpoints): {e}")
+		print('top models:', self.top_model_scores)
 
 	def checkpointing(self,
 		step: int,
@@ -219,22 +220,24 @@ class Manager:
 		'''
 		if config.no_footprint:
 			return
-		path = self.create_model_path(step)
 		# The purpose is to not save all the checkpoints, but top n models.
 		# In this way, we reduce costs of gpu hosting.
 
-		if wer > max(self.top_model_scores, key=lambda x: x[0])[0]:
-			return
-		if (float('inf'), '') in self.top_model_scores:
-			self.top_model_scores = [(wer, path)] * self.n_top_models
-		else:
-			self.top_model_scores.sort(key=lambda x:x[0])
-			self.remove_checkpoints(self.top_model_scores[-1][1])
-			self.top_model_scores = self.top_model_scores[:-1]
+		path = self.create_model_path(step)
+		if len(self.top_model_scores) < self.n_top_models:
 			self.top_model_scores.append((wer, path))
+			self.top_model_scores.sort(key=lambda x: x[0])
+		else:
+			if wer < self.top_model_scores[-1][0]:
+				self.remove_checkpoints(self.top_model_scores[-1][1])
+				self.top_model_scores[-1] = (wer, path)
+				self.top_model_scores.sort(key=lambda x: x[0])
+			else:
+				return
+
 
 		torch.save({
-			'optimizer': self.optimizer.state_dict(),
+			# 'optimizer': self.optimizer.state_dict(),
 			'model': self.model.state_dict(),
 			'model_name': config.model_name,
 			'test_loss': test_loss,
@@ -288,7 +291,7 @@ class Manager:
 		try:
 			checkpoint = torch.load(path)
 			self.model.load_state_dict(checkpoint['model'])
-			self.optimizer.load_state_dict(checkpoint['optimizer'])
+			# self.optimizer.load_state_dict(checkpoint['optimizer'])
 			self.steps = checkpoint['steps']
 		except FileNotFoundError:
 			print(f"File {path} not found.")
