@@ -178,9 +178,10 @@ class AudioEncoder(nn.Module):
 			mask[mask == 1] = 0
 			self.register_buffer('mask', mask, persistent=False)
 		elif causality == 'grouped-causal':
-			nblocks = 15 if dataset == 'boolq' else 7
-			bsize = 100 if dataset == 'boolq' else 50
+			nblocks = 15 if dataset == 'boolq' else 30 # 30 for half, 15 for one, 5 for three
+			bsize = 100 if dataset == 'boolq' else 50 # 50 for half, 100 for one, 300 for three
 			self.mask = None
+			print('nblocks:', nblocks, ', ', 'bsize:', bsize)
 		else:
 			self.mask = None
 
