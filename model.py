@@ -171,15 +171,15 @@ class AudioEncoder(nn.Module):
 			mask = torch.empty(n_ctx, n_ctx).fill_(float('-inf')).triu_(1)
 			self.register_buffer('mask', mask, persistent=False)
 		elif causality == 'bw-semi-causal':
-			nblocks = 15 if dataset == 'boolq' else 7
-			bsize = 100 if dataset == 'boolq' else 50
+			nblocks = 15 if dataset == 'boolq' else 12 # 30 for one, 15 for two, 12 for two and half, 5 for six
+			bsize = 100 if dataset == 'boolq' else 125 # 50 for one, 100 for two, 125 for two and half, 300 for six
 			mask = torch.tril(torch.ones(nblocks, nblocks), diagonal=0).repeat_interleave(bsize, dim=0).repeat_interleave(bsize, dim=1)
 			mask[mask == 0] = float('-inf')
 			mask[mask == 1] = 0
 			self.register_buffer('mask', mask, persistent=False)
 		elif causality == 'grouped-causal':
-			nblocks = 15 if dataset == 'boolq' else 30 # 30 for half, 15 for one, 5 for three
-			bsize = 100 if dataset == 'boolq' else 50 # 50 for half, 100 for one, 300 for three
+			nblocks = 15 if dataset == 'boolq' else 30 # 30 for one, 15 for two, 12 for two and half, 5 for six
+			bsize = 100 if dataset == 'boolq' else 50 # 50 for one, 100 for two, 125 for two and half, 300 for six
 			self.mask = None
 			print('nblocks:', nblocks, ', ', 'bsize:', bsize)
 		else:
